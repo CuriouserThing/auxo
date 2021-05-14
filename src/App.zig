@@ -89,10 +89,11 @@ fn runOuter(self: *App) !void {
         glfw.waitEvents();
     }
 
-    while (!self.aborted and !self.window.should_destroy) {
+    while (!self.aborted) {
         self.model.event_handler.loopCallback(.{
             .window = self.window,
         });
+        if (self.window.should_destroy) break;
         glfw.waitEvents();
     }
 
