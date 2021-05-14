@@ -1,9 +1,9 @@
 usingnamespace @cImport({
-    @cInclude("glad/gl.h");
+    @cInclude("glad/glad.h");
 });
 
 pub fn loadGl(getProcAddress: anytype) !void {
-    if (gladLoadGL(@ptrCast(GLADloadfunc, getProcAddress)) == 0) {
+    if (gladLoadGLLoader(@ptrCast(GLADloadproc, getProcAddress)) == 0) {
         return error.GlLoadError;
     }
 }
