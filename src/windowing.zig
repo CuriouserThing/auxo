@@ -397,6 +397,9 @@ pub const Window = struct {
         self.handle.setDecorated(true);
         self.handle.show();
         self.fake_fullscreen_on = false;
+
+        // For reasons similar to the above.
+        self.handle.restore();
     }
 
     fn isFakeFullscreenWithBounds(self: Window, pos: Point, size: Size) bool {
