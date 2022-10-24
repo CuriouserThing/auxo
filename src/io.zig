@@ -1,6 +1,7 @@
 const std = @import("std");
-const meta = std.meta;
 const math = std.math;
+
+pub const Cardinal = enum { north, east, south, west };
 
 pub const Point = struct {
     x: i32,
@@ -20,15 +21,6 @@ pub const Rectangle = struct {
 pub const VideoMode = struct {
     size: Size,
     refresh_rate: i32,
-};
-
-pub const KeyMods = struct {
-    control: bool,
-    shift: bool,
-    alt: bool,
-    gui: bool,
-    caps_lock: bool,
-    num_lock: bool,
 };
 
 pub const MouseButtonAction = enum {
@@ -94,8 +86,6 @@ pub const JOY_AXIS_MAX = 8;
 /// Maximum number of hats recognized on each joystick. Others will be silently ignored.
 pub const JOY_HAT_MAX = 4;
 
-pub const Cardinal = enum { north, east, south, west };
-
 pub const JoyInputSource = enum {
     button,
     axis,
@@ -105,7 +95,7 @@ pub const JoyInputSource = enum {
     hat_west,
 };
 
-pub const JoyInputIndex = meta.Int(.unsigned, math.log2_int_ceil(usize, @max(JOY_BUTTON_MAX, @max(JOY_AXIS_MAX, JOY_HAT_MAX))));
+pub const JoyInputIndex = std.meta.Int(.unsigned, math.log2_int_ceil(usize, @max(JOY_BUTTON_MAX, @max(JOY_AXIS_MAX, JOY_HAT_MAX))));
 
 pub const JoyInput = struct {
     source: JoyInputSource,
@@ -383,6 +373,15 @@ pub const KeyAction = enum {
     release,
     press,
     repeat,
+};
+
+pub const KeyMods = struct {
+    control: bool,
+    shift: bool,
+    alt: bool,
+    gui: bool,
+    caps_lock: bool,
+    num_lock: bool,
 };
 
 /// A non-exhaustive mapping of keys and USB codes (HID Usage Table 0x07)

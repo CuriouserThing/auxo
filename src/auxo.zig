@@ -5,19 +5,32 @@ const Mutex = std.Thread.Mutex;
 const os: std.Target.Os.Tag = @import("builtin").os.tag;
 
 const io = @import("io.zig");
-const Point = io.Point;
-const Size = io.Size;
-const Rectangle = io.Rectangle;
-const VideoMode = io.VideoMode;
-const KeyMods = io.KeyMods;
-const MouseButtonAction = io.MouseButtonAction;
-const MouseButton = io.MouseButton;
-const Joystick = io.Joystick;
-const JoyButtonState = io.JoyButtonState;
-const JoyHatDirection = io.JoyHatDirection;
-const JoyState = io.JoyState;
-const KeyAction = io.KeyAction;
-const Key = io.Key;
+pub const Cardinal = io.Cardinal;
+pub const Point = io.Point;
+pub const Size = io.Size;
+pub const Rectangle = io.Rectangle;
+pub const VideoMode = io.VideoMode;
+pub const MouseButtonAction = io.MouseButtonAction;
+pub const MouseButton = io.MouseButton;
+pub const KeyAction = io.KeyAction;
+pub const KeyMods = io.KeyMods;
+pub const Key = io.Key;
+pub const Joystick = io.Joystick;
+pub const JoyButtonState = io.JoyButtonState;
+pub const JoyHatDirection = io.JoyHatDirection;
+pub const JoyInputSource = io.JoyInputSource;
+pub const JoyInputIndex = io.JoyInputIndex;
+pub const JoyInput = io.JoyInput;
+pub const GamepadButton = io.GamepadButton;
+pub const GamepadTrigger = io.GamepadTrigger;
+pub const GamepadStick = io.GamepadStick;
+pub const GamepadHat = io.GamepadHat;
+pub const GamepadMapping = io.GamepadMapping;
+pub const GamepadStickState = io.GamepadStickState;
+pub const JoyState = io.JoyState;
+pub const JOY_BUTTON_MAX = io.JOY_BUTTON_MAX;
+pub const JOY_AXIS_MAX = io.JOY_AXIS_MAX;
+pub const JOY_HAT_MAX = io.JOY_HAT_MAX;
 
 const glfw = @import("glfw.zig");
 const Monitor = glfw.Monitor;
@@ -704,10 +717,10 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
 
             const joyStateCallback = model.event_handler.joyStateCallback orelse return;
 
-            var button_buffer: [io.JOY_BUTTON_MAX]JoyButtonState = undefined;
+            var button_buffer: [JOY_BUTTON_MAX]JoyButtonState = undefined;
             var buttons: []JoyButtonState = undefined;
             if (glfw.getJoystickButtons(jid)) |new_buttons| {
-                const len = @min(io.JOY_BUTTON_MAX, new_buttons.len);
+                const len = @min(JOY_BUTTON_MAX, new_buttons.len);
                 var i: usize = 0;
                 while (i < len) : (i += 1) {
                     button_buffer[i] = switch (new_buttons[i]) {
@@ -719,18 +732,18 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
                 buttons = button_buffer[0..len];
             } else return;
 
-            var axis_buffer: [io.JOY_AXIS_MAX]f32 = undefined;
+            var axis_buffer: [JOY_AXIS_MAX]f32 = undefined;
             var axes: []f32 = undefined;
             if (glfw.getJoystickAxes(jid)) |new_axes| {
-                const len = @min(io.JOY_AXIS_MAX, new_axes.len);
+                const len = @min(JOY_AXIS_MAX, new_axes.len);
                 std.mem.copy(f32, &axis_buffer, new_axes[0..len]);
                 axes = axis_buffer[0..len];
             } else return;
 
-            var hat_buffer: [io.JOY_HAT_MAX]JoyHatDirection = undefined;
+            var hat_buffer: [JOY_HAT_MAX]JoyHatDirection = undefined;
             var hats: []JoyHatDirection = undefined;
             if (glfw.getJoystickHats(jid)) |new_hats| {
-                const len = @min(io.JOY_HAT_MAX, new_hats.len);
+                const len = @min(JOY_HAT_MAX, new_hats.len);
                 var i: usize = 0;
                 while (i < len) : (i += 1) {
                     hat_buffer[i] = switch (new_hats[i]) {
