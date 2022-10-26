@@ -545,16 +545,16 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
                 self.update();
                 glfw.waitEvents();
 
-                {
+                if (model.event_handler.messageCallback) |f| {
                     self.input_lock.lock();
                     defer self.input_lock.unlock();
 
-                    if (model.event_handler.messageCallback) |f| f(self.io_state, self.app);
+                    f(self.io_state, self.app);
+                }
 
-                    var jid: i32 = 0;
-                    while (jid < glfw.JOYSTICK_COUNT) : (jid += 1) {
-                        self.readJoystick(jid);
-                    }
+                var jid: i32 = 0;
+                while (jid < glfw.JOYSTICK_COUNT) : (jid += 1) {
+                    self.readJoystick(jid);
                 }
             }
         }
@@ -643,7 +643,6 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
 
                     model.endUpdateFn(self.world_state, self.io_state, report);
                 }
-
                 {
                     self.audio_lock.lock();
                     defer self.audio_lock.unlock();
@@ -680,6 +679,9 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
                 if (joy_status.connected) {
                     joy_status.connected = false;
                     if (model.event_handler.joyDisconnectCallback) |f| {
+                        self.input_lock.lock();
+                        defer self.input_lock.unlock();
+
                         f(self.io_state, self.app, .{ .id = j });
                     }
                 }
@@ -708,6 +710,9 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
             if (!joy_status.connected) {
                 joy_status.connected = true;
                 if (model.event_handler.joyConnectCallback) |f| {
+                    self.input_lock.lock();
+                    defer self.input_lock.unlock();
+
                     f(self.io_state, self.app, .{
                         .id = j,
                         .joystick = joystick,
@@ -761,6 +766,9 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
                 }
                 hats = hat_buffer[0..len];
             } else return;
+
+            self.input_lock.lock();
+            defer self.input_lock.unlock();
 
             joyStateCallback(self.io_state, self.app, .{
                 .id = j,
