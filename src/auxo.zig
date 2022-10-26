@@ -786,6 +786,7 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
         fn render(self: *Self) void {
             const s = @atomicLoad(u64, &self.framebuffer_size, .SeqCst);
             var size: Size = .{ .w = @intCast(u31, (s >> 32) & std.math.maxInt(u31)), .h = @intCast(u31, s & std.math.maxInt(u31)) };
+            if (size.w == 0 or size.h == 0) return;
             if (os == .windows and self.app.fake_fullscreen_on) {
                 size = adjustViewportSizeForFakeFullscreen(size);
             }
