@@ -6,21 +6,32 @@ pub const Cardinal = enum { north, east, south, west };
 pub const Point = struct {
     x: i32,
     y: i32,
+
+    pub const zero = Point{ .x = 0, .y = 0 };
 };
 
 pub const Size = struct {
-    w: u31,
-    h: u31,
+    w: i32,
+    h: i32,
+
+    pub const zero = Size{ .w = 0, .h = 0 };
 };
 
 pub const Rectangle = struct {
     pos: Point,
     size: Size,
+
+    pub const zero = Rectangle{ .pos = Point.zero, .size = Size.zero };
 };
 
-pub const VideoMode = struct {
-    size: Size,
-    refresh_rate: i32,
+// Maximum number of system displays recognized. Others will be silently ignored.
+pub const DISPLAY_MAX = 16;
+
+pub const DisplayInfo = struct {
+    display_area: Rectangle,
+    work_area: Rectangle,
+    refresh_rate: f32,
+    scale_factor: f32,
 };
 
 pub const MouseButtonAction = enum {
@@ -40,11 +51,21 @@ pub const MouseButton = enum {
 // =====================================================================================================================
 // JOYSTICKS
 
-pub const Joystick = struct {
-    vid: ?u16,
-    pid: ?u16,
+// Maximum number of system joysticks recognized. Others will be silently ignored.
+pub const JOYSTICK_MAX = 16;
+
+pub const JoyInfo = struct {
+    vid: ?u16 = null,
+    pid: ?u16 = null,
     is_xinput: bool = false,
 };
+
+/// Maximum number of buttons recognized on each joystick. Others will be silently ignored.
+pub const JOY_BUTTON_MAX = 128;
+/// Maximum number of axes recognized on each joystick. Others will be silently ignored.
+pub const JOY_AXIS_MAX = 8;
+/// Maximum number of hats recognized on each joystick. Others will be silently ignored.
+pub const JOY_HAT_MAX = 4;
 
 pub const JoyButtonState = enum {
     released,
@@ -78,13 +99,6 @@ pub const JoyHatDirection = enum(i4) {
         return self == .southwest or self == .west or self == .northwest;
     }
 };
-
-/// Maximum number of buttons recognized on each joystick. Others will be silently ignored.
-pub const JOY_BUTTON_MAX = 128;
-/// Maximum number of axes recognized on each joystick. Others will be silently ignored.
-pub const JOY_AXIS_MAX = 8;
-/// Maximum number of hats recognized on each joystick. Others will be silently ignored.
-pub const JOY_HAT_MAX = 4;
 
 pub const JoyInputSource = enum {
     button,

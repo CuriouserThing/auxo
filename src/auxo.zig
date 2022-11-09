@@ -9,13 +9,13 @@ pub const Cardinal = io.Cardinal;
 pub const Point = io.Point;
 pub const Size = io.Size;
 pub const Rectangle = io.Rectangle;
-pub const VideoMode = io.VideoMode;
+pub const DisplayInfo = io.DisplayInfo;
 pub const MouseButtonAction = io.MouseButtonAction;
 pub const MouseButton = io.MouseButton;
 pub const KeyAction = io.KeyAction;
 pub const KeyMods = io.KeyMods;
 pub const Key = io.Key;
-pub const Joystick = io.Joystick;
+pub const JoyInfo = io.JoyInfo;
 pub const JoyButtonState = io.JoyButtonState;
 pub const JoyHatDirection = io.JoyHatDirection;
 pub const JoyInputSource = io.JoyInputSource;
@@ -28,6 +28,9 @@ pub const GamepadHat = io.GamepadHat;
 pub const GamepadMapping = io.GamepadMapping;
 pub const GamepadStickState = io.GamepadStickState;
 pub const JoyState = io.JoyState;
+
+pub const DISPLAY_MAX = io.DISPLAY_MAX;
+pub const JOYSTICK_MAX = io.JOYSTICK_MAX;
 pub const JOY_BUTTON_MAX = io.JOY_BUTTON_MAX;
 pub const JOY_AXIS_MAX = io.JOY_AXIS_MAX;
 pub const JOY_HAT_MAX = io.JOY_HAT_MAX;
@@ -41,13 +44,16 @@ pub fn Model(comptime WorldState: type, comptime IoState: type, comptime AudioSt
         world_config: WorldConfig,
         event_handler: EventHandler(IoState),
 
+        createWindowFn: fn ([]DisplayInfo) WindowCreationState,
+
         initFn: ?fn (*const App, *WorldState, *IoState, *AudioState, *VideoState) anyerror!void = null,
-        initVideoFn: ?fn (*VideoState) anyerror!void = null,
+        initVideoFn: ?fn (*const App, *VideoState) anyerror!void = null,
         deinitVideoFn: ?fn (*VideoState) void = null,
         deinitFn: ?fn (*WorldState, *IoState, *AudioState, *VideoState) void = null,
+
         beginUpdateFn: fn (*const IoState, *WorldState) void,
         stepFn: fn (*WorldState) void,
-        endUpdateFn: fn (*const WorldState, *IoState, UpdateReport) void,
+        endUpdateFn: fn (*const WorldState, *IoState, *App, UpdateReport) void,
         writeAudioFn: fn (*const WorldState, *AudioState) void,
         writeVideoFn: fn (*const WorldState, *VideoState) void,
         beginFrameFn: fn (*VideoState, FrameInfo) void,
@@ -83,18 +89,12 @@ pub const WindowCreationState = struct {
     title: [:0]const u8,
     restored_size: Size,
     maximized: bool = false,
+    fullscreen_mode: ?FullscreenMode = null,
 };
 
-pub const WindowedMode = enum {
-    previous_mode,
-    restored,
-    maximized,
-};
-
-pub const FullscreenMode = enum {
-    composited,
-    exclusive_desktop,
-    exclusive_max,
+pub const FullscreenMode = struct {
+    monitor_location: ?Point = null,
+    is_exclusive: bool = false,
 };
 
 // ====================================================================================================================
@@ -102,7 +102,6 @@ pub const FullscreenMode = enum {
 
 pub fn EventHandler(comptime State: type) type {
     return struct {
-        messageCallback: ?fn (*State, *App) void = null,
         closeRequestCallback: ?fn (*State, *App, CloseRequestArgs) void = null,
         focusCallback: ?fn (*State, *App, FocusArgs) void = null,
         iconifyCallback: ?fn (*State, *App, IconifyArgs) void = null,
@@ -112,9 +111,8 @@ pub fn EventHandler(comptime State: type) type {
         cursorPosCallback: ?fn (*State, *App, CursorPosArgs) void = null,
         cursorEnterCallback: ?fn (*State, *App, CursorEnterArgs) void = null,
         scrollCallback: ?fn (*State, *App, ScrollArgs) void = null,
-        joyConnectCallback: ?fn (*State, *App, JoyConnectArgs) void = null,
+        displayStateCallback: ?fn (*State, *App, DisplayStateArgs) void = null,
         joyStateCallback: ?fn (*State, *App, JoyStateArgs) void = null,
-        joyDisconnectCallback: ?fn (*State, *App, JoyDisconnectArgs) void = null,
     };
 }
 
@@ -159,19 +157,15 @@ pub const ScrollArgs = struct {
     y_offset: f64,
 };
 
-pub const JoyConnectArgs = struct {
-    id: usize,
-    joystick: Joystick,
+pub const DisplayStateArgs = struct {
+    displays: []DisplayInfo,
 };
 
 pub const JoyStateArgs = struct {
     id: usize,
-    joystick: Joystick,
+    disconnected: bool,
+    info: JoyInfo,
     state: JoyState,
-};
-
-pub const JoyDisconnectArgs = struct {
-    id: usize,
 };
 
 // ====================================================================================================================
@@ -186,7 +180,6 @@ pub fn run(
     io_state: *IoState,
     audio_state: *AudioState,
     video_state: *VideoState,
-    window_creation_state: WindowCreationState,
 ) !void {
     logGlfwVersion();
     glfw.setErrorCallback(onGlfwError);
@@ -194,19 +187,55 @@ pub fn run(
     try glfw.init();
     defer glfw.terminate();
 
-    const window = try Window.create(window_creation_state.restored_size, window_creation_state.title, null, null);
+    // Populate array of displays
+    const monitors = try Monitor.getAll();
+    var display_buffer: [DISPLAY_MAX]DisplayInfo = undefined;
+    const display_count = @min(monitors.len, DISPLAY_MAX);
+    for (monitors[0..display_count]) |monitor, i| {
+        display_buffer[i] = try getDisplayInfo(monitor.?);
+    }
+
+    const creation_state = model.createWindowFn(display_buffer[0..display_count]);
+    glfw.hintWindowMaximized(creation_state.maximized);
+    var maybe_mon: ?*Monitor = null;
+
+    // Determine the size and optional monitor to pass to glfwCreateWindow
+    var creation_mon: ?*Monitor = null;
+    var creation_size = creation_state.restored_size;
+    if (creation_state.fullscreen_mode) |mode| {
+        const loc = mode.monitor_location orelse Point.zero;
+        maybe_mon = getMonitorAtPoint(monitors, loc.x, loc.y);
+        if (maybe_mon) |mon| {
+            // Handle real fullscreen via glfwCreateWindow
+            if (os != .windows or mode.is_exclusive) {
+                const vm = try mon.getVideoMode();
+                creation_mon = mon;
+                creation_size = .{ .w = vm.width, .h = vm.height };
+            }
+        }
+    }
+
+    const window = try Window.create(creation_size, creation_state.title, creation_mon, null);
     defer window.destroy();
 
     var app: App = .{
         .window = window,
-        .restored_pos = window.getPos() catch .{ .x = 0, .y = 0 },
-        .restored_size = window.getSize() catch window_creation_state.restored_size,
+        .restored_pos = window.getPos() catch Point.zero,
+        .restored_size = creation_state.restored_size,
+        .was_maximized = creation_state.maximized,
         .frame_tracker = .{ .timer = try Timer.start() },
     };
 
-    if (window_creation_state.maximized == true) window.maximize();
-    const fb = try window.getFramebufferSize();
+    if (creation_state.fullscreen_mode) |mode| {
+        if (maybe_mon) |mon| {
+            // Handle fake fullscreen manually
+            if (os == .windows and !mode.is_exclusive) {
+                try app.turnCompositedToFakeFullscreen(mon);
+            }
+        }
+    }
 
+    const fb = try window.getFramebufferSize();
     const G = Game(WorldState, IoState, AudioState, VideoState, model);
     var game = G{
         .app = &app,
@@ -215,6 +244,8 @@ pub fn run(
         .audio_state = audio_state,
         .video_state = video_state,
         .timer = try Timer.start(),
+        .display_buffer = display_buffer,
+        .display_count = display_count,
         .framebuffer_size = (@intCast(u64, fb.w) << 32) | (@intCast(u64, fb.h)),
     };
     window.setUserPointer(G, &game);
@@ -241,7 +272,6 @@ pub const App = struct {
 
     window: *Window,
     frame_tracker: FrameTracker(60, 240),
-    should_close: bool = false,
 
     // Cached state
     restored_pos: Point,
@@ -249,10 +279,22 @@ pub const App = struct {
     was_maximized: bool = false,
     fake_fullscreen_on: if (os == .windows) bool else void = if (os == .windows) false else {},
 
-    /// On Windows, this is the video mode we assume the DWM uses for composition on this monitor.
-    /// We cache this to remember what the desktop mode is before setting some other mode.
-    /// Our detection mechanisms are not perfect, but they work for all but a few corner cases.
-    detected_dwm_mode: ?VideoMode = null,
+    // Queued state
+    should_close: bool = false,
+    queued_mode_change: ModeChange = .{ .none = {} },
+
+    const ModeChangeKind = enum {
+        none,
+        toggle_fullscreen,
+        turn_fullscreen_on,
+        turn_fullscreen_off,
+    };
+    const ModeChange = union(ModeChangeKind) {
+        none: void,
+        toggle_fullscreen: FullscreenMode,
+        turn_fullscreen_on: FullscreenMode,
+        turn_fullscreen_off: void,
+    };
 
     fn onPos(self: *Self, pos: Point) void {
         if (self.shouldCacheRestoredBounds()) {
@@ -292,87 +334,67 @@ pub const App = struct {
         self.should_close = true;
     }
 
-    pub fn toggleFullscreen(self: *Self, windowed_mode: WindowedMode, fullscreen_mode: FullscreenMode) !void {
-        const should_maximize = self.shouldMaximizeFromMode(windowed_mode);
-        if (self.window.getFullscreenMonitor()) |_| {
-            self.turnRealFullscreenToWindowed(should_maximize);
-        } else if (os == .windows and self.fake_fullscreen_on) {
-            self.turnFakeFullscreenToWindowed(should_maximize);
-        } else {
-            try self.turnCompositedToFullscreen(fullscreen_mode);
-        }
+    pub fn toggleFullscreen(self: *Self, fullscreen_mode: FullscreenMode) void {
+        self.queued_mode_change = .{ .toggle_fullscreen = fullscreen_mode };
     }
 
-    pub fn turnFullscreenOn(self: *Self, mode: FullscreenMode) !void {
-        if (self.window.getFullscreenMonitor()) |monitor| {
-            const vm = if (os == .windows and mode == .exclusive_max) try getMaxMode(monitor) else try self.getDesktopMode(monitor);
-            if (os == .windows and mode == .composited) {
-                self.fake_fullscreen_on = true;
-                self.window.setDecorated(false);
-                const pos = monitor.getPos();
-                const size = adjustWindowSizeForFakeFullscreen(vm.size);
-                self.setWindowed(pos, size);
-            } else {
-                const rr = if (os == .windows) vm.refresh_rate else null;
-                self.setFullscreen(monitor, vm.size, rr);
-            }
-        } else {
-            if (os == .windows and mode != .composited and self.fake_fullscreen_on) {
-                self.turnFakeFullscreenOff();
-            }
-            try self.turnCompositedToFullscreen(mode);
-        }
+    pub fn turnFullscreenOn(self: *Self, mode: FullscreenMode) void {
+        self.queued_mode_change = .{ .turn_fullscreen_on = mode };
     }
 
-    pub fn turnFullscreenOff(self: *Self, mode: WindowedMode) !void {
-        const should_maximize = self.shouldMaximizeFromMode(mode);
-        if (self.window.getFullscreenMonitor()) |_| {
-            self.turnRealFullscreenToWindowed(should_maximize);
-        } else if (os == .windows and self.fake_fullscreen_on) {
-            self.turnFakeFullscreenToWindowed(should_maximize);
-        } else if (should_maximize) {
-            self.window.maximize();
-        } else {
-            self.window.restore();
-        }
+    pub fn turnFullscreenOff(self: *Self) void {
+        self.queued_mode_change = .{ .turn_fullscreen_off = {} };
     }
 
-    fn turnRealFullscreenToWindowed(self: *Self, should_maximize: bool) void {
-        self.setWindowed(self.restored_pos, self.restored_size);
-        self.window.restore();
-        if (should_maximize) self.window.maximize();
-    }
-
-    fn turnFakeFullscreenToWindowed(self: *Self, should_maximize: bool) void {
-        self.turnFakeFullscreenOff();
-        if (should_maximize) {
-            self.window.maximize();
-        } else {
-            // Since we're fake-restoring the window (fake fullscreen is technically restored), we need to manually flag that we've restored it.
-            self.was_maximized = false;
-        }
-    }
-
-    fn turnCompositedToFullscreen(self: *Self, mode: FullscreenMode) !void {
-        const monitor = try self.getWindowedMonitor() orelse try Monitor.getPrimary();
-        if (os != .windows) {
-            const vm = try monitor.getCurrentMode();
-            self.setFullscreen(monitor, vm.size, null);
-        } else if (mode == .composited) {
-            try self.turnCompositedToFakeFullscreen(monitor);
-        } else {
-            const dvm = try self.getCurrentModeAsDesktopMode(monitor); // to cache current mode as desktop mode regardless
-            const vm = if (mode == .exclusive_max) try getMaxMode(monitor) else dvm;
-            self.setFullscreen(monitor, vm.size, vm.refresh_rate);
+    fn changeMode(self: *Self, mode_change: ModeChange) !void {
+        switch (mode_change) {
+            .none => return,
+            .toggle_fullscreen => |mode| {
+                if (self.window.getFullscreenMonitor()) |_| {
+                    self.turnRealFullscreenToWindowed();
+                } else if (os == .windows and self.fake_fullscreen_on) {
+                    self.turnFakeFullscreenToWindowed();
+                } else {
+                    const monitor = try findMonitorMatch(mode.monitor_location, self.window);
+                    if (os == .windows and !mode.is_exclusive) {
+                        try self.turnCompositedToFakeFullscreen(monitor);
+                    } else {
+                        const vm = try monitor.getVideoMode();
+                        self.window.setFullscreen(monitor, .{ .w = vm.width, .h = vm.height }, vm.refreshRate);
+                    }
+                }
+            },
+            .turn_fullscreen_on => |mode| {
+                const monitor = try findMonitorMatch(mode.monitor_location, self.window);
+                if (os == .windows and !mode.is_exclusive) {
+                    if (self.window.getFullscreenMonitor()) |_| {
+                        self.turnRealFullscreenToWindowed();
+                    }
+                    try self.turnCompositedToFakeFullscreen(monitor);
+                } else {
+                    if (os == .windows and self.fake_fullscreen_on) {
+                        self.turnFakeFullscreenToWindowed();
+                    }
+                    const vm = try monitor.getVideoMode();
+                    self.window.setFullscreen(monitor, .{ .w = vm.width, .h = vm.height }, vm.refreshRate);
+                }
+            },
+            .turn_fullscreen_off => {
+                if (self.window.getFullscreenMonitor()) |_| {
+                    self.turnRealFullscreenToWindowed();
+                } else if (os == .windows and self.fake_fullscreen_on) {
+                    self.turnFakeFullscreenToWindowed();
+                } // else nothing needed
+            },
         }
     }
 
     fn turnCompositedToFakeFullscreen(self: *Self, monitor: *Monitor) !void {
-        const vm = try self.getCurrentModeAsDesktopMode(monitor);
-        const pos = monitor.getPos();
-        const size = adjustWindowSizeForFakeFullscreen(vm.size);
+        const pos = try monitor.getPos();
+        const vm = try monitor.getVideoMode();
+        const size = Size{ .w = vm.width, .h = vm.height };
 
-        // Return if we're not changing anything, so the window doesn't flicker.
+        // Return if we're already fake fullscreen on this monitor, so the window doesn't flicker.
         if (self.isFakeFullscreenWithBounds(pos, size)) return;
 
         // We must first restore the window to deal with two cases:
@@ -391,7 +413,7 @@ pub const App = struct {
         self.window.show();
     }
 
-    fn turnFakeFullscreenOff(self: *Self) void {
+    fn turnFakeFullscreenToWindowed(self: *Self) void {
         self.window.hide();
         self.window.setSize(self.restored_size);
         self.window.setPos(self.restored_pos);
@@ -399,8 +421,15 @@ pub const App = struct {
         self.window.show();
         self.fake_fullscreen_on = false;
 
-        // For reasons similar to the above.
         self.window.restore();
+        if (self.was_maximized) self.window.maximize();
+    }
+
+    fn turnRealFullscreenToWindowed(self: *Self) void {
+        self.window.setWindowed(self.restored_pos, self.restored_size);
+
+        self.window.restore();
+        if (self.was_maximized) self.window.maximize();
     }
 
     fn isFakeFullscreenWithBounds(self: *Self, pos: Point, size: Size) bool {
@@ -414,72 +443,44 @@ pub const App = struct {
 
         return true;
     }
+};
 
-    fn shouldMaximizeFromMode(self: *Self, mode: WindowedMode) bool {
-        return mode == .maximized or (mode == .previous_mode and self.was_maximized);
-    }
+const Joystick = struct {
+    const ButtonField = std.meta.Int(.unsigned, JOY_BUTTON_MAX);
+    const AxisField = [JOY_AXIS_MAX]i16;
+    const HatField = [JOY_HAT_MAX]JoyHatDirection;
+    const button_default: ButtonField = 0;
+    const axis_default = [_]i16{0} ** JOY_AXIS_MAX;
+    const hat_default = [_]JoyHatDirection{.centered} ** JOY_HAT_MAX;
 
-    /// If possible, returns the monitor containing the center pixel of this window's content area.
-    fn getWindowedMonitor(self: *Self) !?*Monitor {
-        const wpos = try self.window.getPos();
-        const wsize = try self.window.getSize();
-        const wx = wpos.x +% wsize.w / 2;
-        const wy = wpos.y +% wsize.h / 2;
+    buttons: ButtonField = button_default,
+    axes: AxisField = axis_default,
+    hats: HatField = hat_default,
+    info: JoyInfo = .{},
+    connected: bool = false,
 
-        var monitors = try Monitor.getAll();
-        while (monitors.next()) |monitor| {
-            const mpos = monitor.getPos();
-            const msize = (try monitor.getCurrentVideoMode()).size;
-            const ml = mpos.x;
-            const mt = mpos.y;
-            const mr = ml +% msize.w;
-            const mb = mt +% msize.h;
-
-            if (wx >= ml and wx < mr and wy >= mt and wy < mb) {
-                return monitor;
-            }
-        } else return null;
-    }
-
-    fn setFullscreen(self: *Self, monitor: *Monitor, size: Size, refresh_rate: ?i32) void {
-        self.window.setFullscreen(monitor, size, refresh_rate);
-        self.handleModeSwitch();
-    }
-
-    fn setWindowed(self: *Self, pos: Point, size: Size) void {
-        self.window.setWindowed(pos, size);
-        self.handleModeSwitch();
-    }
-
-    fn handleModeSwitch(self: *Self) void {
-        // There's a chance we're changing the refresh rate and therefore possibly the frame rate.
-        // Regardless, a clean slate is preferable.
-        self.frame_tracker.reset();
-    }
-
-    /// Get a monitor's current video mode and cache it as the DWM video mode for this app.
-    /// Should be called if running on Windows and *reasonably* certain that the monitor isn't currently fullscreen.
-    fn getCurrentModeAsDesktopMode(self: *Self, monitor: *Monitor) !VideoMode {
-        const mode = try monitor.getCurrentVideoMode();
-        self.detected_dwm_mode = mode;
-        return mode;
-    }
-
-    fn getDesktopMode(self: *Self, monitor: *Monitor) !VideoMode {
-        if (os == .windows) {
-            return self.detected_dwm_mode orelse try monitor.getCurrentVideoMode();
-        } else {
-            return try monitor.getCurrentVideoMode();
+    fn save_state(self: *Joystick, buttons: []JoyButtonState, axes: []f32, hats: []JoyHatDirection, state_changed: *bool) void {
+        var ba = button_default;
+        for (buttons) |button, i| {
+            const S = comptime std.meta.Int(.unsigned, std.math.log2_int_ceil(usize, JOY_BUTTON_MAX));
+            if (button == .pressed) ba |= comptime @intCast(ButtonField, 1) << @intCast(S, i);
         }
-    }
 
-    fn getMaxMode(monitor: *Monitor) !VideoMode {
-        var iter = try monitor.getAllVideoModes();
-        var max_mode: ?VideoMode = null;
-        while (iter.next()) |mode| {
-            max_mode = mode;
+        var ha = hat_default;
+        for (hats) |hat, i| {
+            ha[i] = hat;
         }
-        return max_mode orelse error.Unknown;
+
+        var aa = axis_default;
+        for (axes) |axis, i| {
+            // This should be lossless but it's not the end of the world if it isn't
+            aa[i] = @floatToInt(i16, @max(-32768, @min(32767, axis * 32767.5 - 0.5)));
+        }
+
+        state_changed.* = self.buttons != ba or !std.mem.eql(i16, &self.axes, &aa) or !std.mem.eql(JoyHatDirection, &self.hats, &ha);
+        self.buttons = ba;
+        self.axes = aa;
+        self.hats = ha;
     }
 };
 
@@ -499,12 +500,9 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
         world_lock: RwLock = .{},
         audio_lock: Mutex = .{},
         framebuffer_size: u64,
-        joysticks: [glfw.JOYSTICK_COUNT]JoyStatus = [_]JoyStatus{.{}} ** glfw.JOYSTICK_COUNT,
-
-        const JoyStatus = struct {
-            joystick: ?Joystick = null,
-            connected: bool = false,
-        };
+        display_buffer: [DISPLAY_MAX]DisplayInfo,
+        display_count: usize = 0,
+        joysticks: [glfw.JOYSTICK_COUNT]Joystick = [_]Joystick{.{}} ** glfw.JOYSTICK_COUNT,
 
         const ticks_per_step = result: {
             const max_int = std.math.maxInt(u64);
@@ -542,26 +540,33 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
             }
 
             while (!self.app.should_close and !render_loop_aborted) {
-                self.update();
-                glfw.waitEvents();
-
-                if (model.event_handler.messageCallback) |f| {
-                    self.input_lock.lock();
-                    defer self.input_lock.unlock();
-
-                    f(self.io_state, self.app);
-                }
+                // Swallow GLFW errors and rely on GLFW error callback for logging
+                self.readMonitors() catch {};
 
                 var jid: i32 = 0;
                 while (jid < glfw.JOYSTICK_COUNT) : (jid += 1) {
-                    self.readJoystick(jid);
+                    self.readJoystick(jid) catch {};
                 }
+
+                self.update();
+
+                var mode_change: App.ModeChange = undefined;
+                {
+                    self.input_lock.lock();
+                    defer self.input_lock.unlock();
+
+                    mode_change = self.app.queued_mode_change;
+                    self.app.queued_mode_change = .{ .none = {} };
+                }
+                self.app.changeMode(mode_change) catch {};
+
+                glfw.waitEvents();
             }
         }
 
         fn renderLoop(self: *Self, event_loop_broken: *const bool, render_loop_aborted: *bool) void {
             if (model.initVideoFn) |init| {
-                init(self.video_state) catch {
+                init(self.app, self.video_state) catch {
                     render_loop_aborted.* = true;
                     return;
                 };
@@ -641,7 +646,7 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
                     self.input_lock.lock();
                     defer self.input_lock.unlock();
 
-                    model.endUpdateFn(self.world_state, self.io_state, report);
+                    model.endUpdateFn(self.world_state, self.io_state, self.app, report);
                 }
                 {
                     self.audio_lock.lock();
@@ -650,135 +655,6 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
                     model.writeAudioFn(self.world_state, self.audio_state);
                 }
             }
-        }
-
-        fn charToHex(c: u8) ?u16 {
-            return switch (c) {
-                '0'...'9' => c - '0' + 0x0,
-                'A'...'F' => c - 'A' + 0xA,
-                'a'...'f' => c - 'a' + 0xa,
-                else => null,
-            };
-        }
-
-        fn stringToId(s: *const [4]u8) ?u16 {
-            // IDs are stored LE
-            const a = charToHex(s[2]) orelse return null;
-            const b = charToHex(s[3]) orelse return null;
-            const c = charToHex(s[0]) orelse return null;
-            const d = charToHex(s[1]) orelse return null;
-            return (a << 12) | (b << 8) | (c << 4) | (d);
-        }
-
-        /// Returns silently on failure (no handling; relies on GLFW error callback for logging)
-        fn readJoystick(self: *Self, jid: i32) void {
-            const j = @intCast(usize, jid);
-            var joy_status = &self.joysticks[j];
-
-            if (!glfw.joystickPresent(jid)) {
-                if (joy_status.connected) {
-                    joy_status.connected = false;
-                    if (model.event_handler.joyDisconnectCallback) |f| {
-                        self.input_lock.lock();
-                        defer self.input_lock.unlock();
-
-                        f(self.io_state, self.app, .{ .id = j });
-                    }
-                }
-                return;
-            }
-
-            var vid: ?u16 = null;
-            var pid: ?u16 = null;
-            var is_xinput = false;
-            if (glfw.getJoystickGuid(jid)) |guid| {
-                // On GLFW, only read VID and PID if this isn't an XInput controller
-                const XINPUT_ID = "7869";
-                is_xinput = guid.len >= 4 and std.mem.eql(u8, guid[0..4], XINPUT_ID);
-                if (!is_xinput) {
-                    if (guid.len >= 12) vid = stringToId(guid[8..12]);
-                    if (guid.len >= 20) pid = stringToId(guid[16..20]);
-                }
-            } else return;
-            const joystick = Joystick{
-                .vid = vid,
-                .pid = pid,
-                .is_xinput = is_xinput,
-            };
-            joy_status.joystick = joystick;
-
-            if (!joy_status.connected) {
-                joy_status.connected = true;
-                if (model.event_handler.joyConnectCallback) |f| {
-                    self.input_lock.lock();
-                    defer self.input_lock.unlock();
-
-                    f(self.io_state, self.app, .{
-                        .id = j,
-                        .joystick = joystick,
-                    });
-                }
-            }
-
-            const joyStateCallback = model.event_handler.joyStateCallback orelse return;
-
-            var button_buffer: [JOY_BUTTON_MAX]JoyButtonState = undefined;
-            var buttons: []JoyButtonState = undefined;
-            if (glfw.getJoystickButtons(jid)) |new_buttons| {
-                const len = @min(JOY_BUTTON_MAX, new_buttons.len);
-                var i: usize = 0;
-                while (i < len) : (i += 1) {
-                    button_buffer[i] = switch (new_buttons[i]) {
-                        .release => .released,
-                        .press => .pressed,
-                        _ => .released,
-                    };
-                }
-                buttons = button_buffer[0..len];
-            } else return;
-
-            var axis_buffer: [JOY_AXIS_MAX]f32 = undefined;
-            var axes: []f32 = undefined;
-            if (glfw.getJoystickAxes(jid)) |new_axes| {
-                const len = @min(JOY_AXIS_MAX, new_axes.len);
-                std.mem.copy(f32, &axis_buffer, new_axes[0..len]);
-                axes = axis_buffer[0..len];
-            } else return;
-
-            var hat_buffer: [JOY_HAT_MAX]JoyHatDirection = undefined;
-            var hats: []JoyHatDirection = undefined;
-            if (glfw.getJoystickHats(jid)) |new_hats| {
-                const len = @min(JOY_HAT_MAX, new_hats.len);
-                var i: usize = 0;
-                while (i < len) : (i += 1) {
-                    hat_buffer[i] = switch (new_hats[i]) {
-                        .up => .north,
-                        .right_up => .northeast,
-                        .right => .east,
-                        .right_down => .southeast,
-                        .down => .south,
-                        .left_down => .southwest,
-                        .left => .west,
-                        .left_up => .northwest,
-                        .centered => .centered,
-                        _ => .centered,
-                    };
-                }
-                hats = hat_buffer[0..len];
-            } else return;
-
-            self.input_lock.lock();
-            defer self.input_lock.unlock();
-
-            joyStateCallback(self.io_state, self.app, .{
-                .id = j,
-                .joystick = joystick,
-                .state = .{
-                    .buttons = buttons,
-                    .axes = axes,
-                    .hats = hats,
-                },
-            });
         }
 
         fn writeVideo(self: *Self) void {
@@ -793,11 +669,8 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
 
         fn render(self: *Self) void {
             const s = @atomicLoad(u64, &self.framebuffer_size, .SeqCst);
-            var size: Size = .{ .w = @intCast(u31, (s >> 32) & std.math.maxInt(u31)), .h = @intCast(u31, s & std.math.maxInt(u31)) };
+            const size: Size = .{ .w = @intCast(u31, (s >> 32) & std.math.maxInt(u31)), .h = @intCast(u31, s & std.math.maxInt(u31)) };
             if (size.w == 0 or size.h == 0) return;
-            if (os == .windows and self.app.fake_fullscreen_on) {
-                size = adjustViewportSizeForFakeFullscreen(size);
-            }
 
             const estimated_fps = self.app.frame_tracker.estimateFps();
             const delta_ticks = self.timer.read() - self.video_timestamp;
@@ -820,6 +693,172 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
             model.endFrameFn(self.video_state, frame_info);
 
             self.app.frame_tracker.startOrLap();
+        }
+
+        fn readMonitors(self: *Self) glfw.Error!void {
+            var state_changed = false;
+            const monitors = try Monitor.getAll();
+            const display_count = @min(monitors.len, DISPLAY_MAX);
+            if (self.display_count != display_count) {
+                state_changed = true;
+            }
+
+            // Use temp buffer to avoid writing an incomplete display state on error
+            var buffer: [DISPLAY_MAX]DisplayInfo = undefined;
+
+            for (monitors[0..display_count]) |maybe_monitor, i| {
+                const monitor = maybe_monitor orelse return glfw.Error.Unknown;
+                const old_info = self.display_buffer[i];
+                const new_info = try getDisplayInfo(monitor);
+                if (std.meta.eql(old_info, new_info)) {
+                    buffer[i] = old_info;
+                } else {
+                    buffer[i] = new_info;
+                    state_changed = true;
+                }
+            }
+
+            if (state_changed) {
+                self.display_count = display_count;
+                std.mem.copy(DisplayInfo, self.display_buffer[0..display_count], buffer[0..display_count]);
+
+                if (model.event_handler.displayStateCallback) |f| {
+                    self.input_lock.lock();
+                    defer self.input_lock.unlock();
+
+                    f(self.io_state, self.app, .{
+                        .displays = buffer[0..display_count],
+                    });
+                }
+            }
+        }
+
+        /// In addition to GLFW-reported errors, returns glfw.Error.Unknown if we can't read a detected joystick's state.
+        fn readJoystick(self: *Self, jid: i32) glfw.Error!void {
+            const j = @intCast(usize, jid);
+            var joystick = &self.joysticks[j];
+
+            if (!glfw.joystickPresent(jid)) {
+                const joyStateCallback = model.event_handler.joyStateCallback orelse return;
+                if (joystick.connected) {
+                    self.input_lock.lock();
+                    defer self.input_lock.unlock();
+
+                    joyStateCallback(self.io_state, self.app, .{
+                        .id = j,
+                        .disconnected = true,
+                        .info = joystick.info, // cached info
+                        .state = .{
+                            .buttons = &[0]JoyButtonState{},
+                            .axes = &[0]f32{},
+                            .hats = &[0]JoyHatDirection{},
+                        },
+                    });
+                    joystick.* = .{};
+                }
+                return;
+            }
+
+            var vid: ?u16 = null;
+            var pid: ?u16 = null;
+            var is_xinput = false;
+            if (try glfw.getJoystickGuid(jid)) |guid| {
+                // On GLFW, only read VID and PID if this isn't an XInput controller
+                const XINPUT_ID = "7869";
+                is_xinput = guid.len >= 4 and std.mem.eql(u8, guid[0..4], XINPUT_ID);
+                if (!is_xinput) {
+                    if (guid.len >= 12) vid = stringToId(guid[8..12]);
+                    if (guid.len >= 20) pid = stringToId(guid[16..20]);
+                }
+            } else return glfw.Error.Unknown;
+            const info = JoyInfo{
+                .vid = vid,
+                .pid = pid,
+                .is_xinput = is_xinput,
+            };
+            joystick.info = info;
+
+            var button_buffer: [JOY_BUTTON_MAX]JoyButtonState = undefined;
+            var buttons: []JoyButtonState = undefined;
+            if (try glfw.getJoystickButtons(jid)) |new_buttons| {
+                const len = @min(JOY_BUTTON_MAX, new_buttons.len);
+                var i: usize = 0;
+                while (i < len) : (i += 1) {
+                    button_buffer[i] = switch (new_buttons[i]) {
+                        .release => .released,
+                        .press => .pressed,
+                        _ => .released,
+                    };
+                }
+                buttons = button_buffer[0..len];
+            } else return glfw.Error.Unknown;
+
+            var axis_buffer: [JOY_AXIS_MAX]f32 = undefined;
+            var axes: []f32 = undefined;
+            if (try glfw.getJoystickAxes(jid)) |new_axes| {
+                const len = @min(JOY_AXIS_MAX, new_axes.len);
+                std.mem.copy(f32, &axis_buffer, new_axes[0..len]);
+                axes = axis_buffer[0..len];
+            } else return glfw.Error.Unknown;
+
+            var hat_buffer: [JOY_HAT_MAX]JoyHatDirection = undefined;
+            var hats: []JoyHatDirection = undefined;
+            if (try glfw.getJoystickHats(jid)) |new_hats| {
+                const len = @min(JOY_HAT_MAX, new_hats.len);
+                var i: usize = 0;
+                while (i < len) : (i += 1) {
+                    hat_buffer[i] = switch (new_hats[i]) {
+                        .up => .north,
+                        .right_up => .northeast,
+                        .right => .east,
+                        .right_down => .southeast,
+                        .down => .south,
+                        .left_down => .southwest,
+                        .left => .west,
+                        .left_up => .northwest,
+                        .centered => .centered,
+                        _ => .centered,
+                    };
+                }
+                hats = hat_buffer[0..len];
+            } else return glfw.Error.Unknown;
+
+            var state_changed = false;
+            joystick.save_state(buttons, axes, hats, &state_changed);
+            const joyStateCallback = model.event_handler.joyStateCallback orelse return;
+            if (state_changed) {
+                self.input_lock.lock();
+                defer self.input_lock.unlock();
+
+                joyStateCallback(self.io_state, self.app, .{
+                    .id = j,
+                    .disconnected = false,
+                    .info = info,
+                    .state = .{
+                        .buttons = buttons,
+                        .axes = axes,
+                        .hats = hats,
+                    },
+                });
+            }
+        }
+
+        fn stringToId(s: *const [4]u8) ?u16 {
+            // IDs are stored LE
+            const a = charToHex(s[2]) orelse return null;
+            const b = charToHex(s[3]) orelse return null;
+            const c = charToHex(s[0]) orelse return null;
+            const d = charToHex(s[1]) orelse return null;
+            return (a << 12) | (b << 8) | (c << 4) | (d);
+        }
+
+        fn charToHex(c: u8) ?u16 {
+            return switch (c) {
+                '0'...'9' => c - '0' + 0x0,
+                'A'...'F' => c - 'A' + 0xA,
+                'a'...'f' => c - 'a' + 0xa,
+                else => null,
+            };
         }
 
         fn onPos(self: *Self, pos: Point) void {
@@ -941,6 +980,9 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
     };
 }
 
+// ====================================================================================================================
+// HELPER FUNCTIONS
+
 fn logGlfwVersion() void {
     std.log.info("Compiled against GLFW {}.{}.{}", .{ glfw.versionMajor, glfw.versionMinor, glfw.versionRevision });
 
@@ -952,19 +994,68 @@ fn logGlfwVersion() void {
     std.log.info("Running against GLFW {}.{}.{} ({s})", .{ major, minor, revision, version_str });
 }
 
-fn onGlfwError(error_code: glfw.Error, description: []const u8) void {
-    std.log.err("GLFW error {s}: {s}", .{ @errorName(error_code), description });
+fn onGlfwError(error_code: ?glfw.Error, description: []const u8) void {
+    std.log.err("GLFW error {s}: {s}", .{ @errorName(error_code orelse glfw.Error.Unknown), description });
 }
 
-/// Hack to keep the window truly composited on Windows.
-fn adjustWindowSizeForFakeFullscreen(size: Size) Size {
-    return .{ .w = size.w, .h = size.h + 1 };
+fn getDisplayInfo(monitor: *Monitor) glfw.Error!DisplayInfo {
+    const vm = try monitor.getVideoMode();
+    const size = Size{ .w = vm.width, .h = vm.height };
+    const pos = try monitor.getPos();
+    const work_area = try monitor.getWorkarea();
+    const scale = try monitor.getContentScale();
+    return .{
+        .display_area = .{ .size = size, .pos = pos },
+        .work_area = work_area,
+        .refresh_rate = @intToFloat(f32, vm.refreshRate),
+        .scale_factor = scale.xscale,
+    };
 }
 
-/// Adjustment to reverse the hack for rendering.
-fn adjustViewportSizeForFakeFullscreen(size: Size) Size {
-    return .{ .w = size.w, .h = size.h - 1 };
+fn findMonitorMatch(point: ?Point, window: ?*Window) !*Monitor {
+    var monitors = Monitor.getAll() catch return Monitor.getPrimary();
+
+    // 1. Try to return monitor at point, if given.
+    if (point) |p| {
+        if (getMonitorAtPoint(monitors, p.x, p.y)) |monitor| return monitor;
+    }
+
+    // 2. Try to return monitor at center of window, if given.
+    if (window) |w| b: {
+        const wpos = w.getPos() catch break :b;
+        const wsize = w.getSize() catch break :b;
+        const wx = wpos.x +% @divTrunc(wsize.w, 2);
+        const wy = wpos.y +% @divTrunc(wsize.h, 2);
+        if (getMonitorAtPoint(monitors, wx, wy)) |monitor| return monitor;
+    }
+
+    // 3. Try to return any monitor.
+    for (monitors) |maybe_monitor| {
+        if (maybe_monitor) |monitor| return monitor;
+    }
+
+    // 4. Fall back on the primary monitor.
+    return Monitor.getPrimary();
 }
+
+fn getMonitorAtPoint(monitors: []?*Monitor, x: i32, y: i32) ?*Monitor {
+    for (monitors) |maybe_monitor| {
+        if (maybe_monitor) |monitor| {
+            const pos = monitor.getPos() catch continue;
+            const vm = monitor.getVideoMode() catch continue;
+            const ml = pos.x;
+            const mt = pos.y;
+            const mr = ml +% vm.width;
+            const mb = mt +% vm.height;
+            if (x >= ml and x < mr and y >= mt and y < mb) {
+                return monitor;
+            }
+        }
+    }
+    return null;
+}
+
+// ====================================================================================================================
 
 /// A simple reader-writer lock with the functionality to downgrade a write lock to a read lock.
 const RwLock = struct {

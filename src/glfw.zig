@@ -6,7 +6,7 @@ const std = @import("std");
 const io = @import("io.zig");
 const Point = io.Point;
 const Size = io.Size;
-const VideoMode = io.VideoMode;
+const Rectangle = io.Rectangle;
 const KeyMods = io.KeyMods;
 const MouseButtonAction = io.MouseButtonAction;
 const MouseButton = io.MouseButton;
@@ -23,19 +23,8 @@ pub fn getVersionString() []const u8 {
     return std.mem.sliceTo(c.glfwGetVersionString(), 0);
 }
 
-pub const ErrorCallback = fn (Error, []const u8) void;
-pub fn setErrorCallback(comptime callback: ?*const ErrorCallback) void {
-    errorCallback = callback;
-    _ = c.glfwSetErrorCallback(if (callback) |_| cErrorCallback else null);
-}
-var errorCallback: ?*const ErrorCallback = null;
-fn cErrorCallback(error_code: c_int, description: [*c]const u8) callconv(.C) void {
-    errorCallback.?(codeToError(error_code), std.mem.sliceTo(description, 0));
-}
-
 pub const Error = error{
     Unknown,
-    NoError,
     NotInitialized,
     NoCurrentContext,
     InvalidEnum,
@@ -48,9 +37,19 @@ pub const Error = error{
     NoWindowContext,
 };
 
-fn codeToError(code: c_int) Error {
+pub const ErrorCallback = fn (?Error, []const u8) void;
+pub fn setErrorCallback(comptime callback: ?*const ErrorCallback) void {
+    errorCallback = callback;
+    _ = c.glfwSetErrorCallback(if (callback) |_| cErrorCallback else null);
+}
+var errorCallback: ?*const ErrorCallback = null;
+fn cErrorCallback(error_code: c_int, description: [*c]const u8) callconv(.C) void {
+    errorCallback.?(codeToError(error_code), std.mem.sliceTo(description, 0));
+}
+
+fn codeToError(code: c_int) ?Error {
     return switch (code) {
-        c.GLFW_NO_ERROR => Error.NoError,
+        c.GLFW_NO_ERROR => null,
         c.GLFW_NOT_INITIALIZED => Error.NotInitialized,
         c.GLFW_NO_CURRENT_CONTEXT => Error.NoCurrentContext,
         c.GLFW_INVALID_ENUM => Error.InvalidEnum,
@@ -65,33 +64,23 @@ fn codeToError(code: c_int) Error {
     };
 }
 
-fn getError() Error {
+fn getError() ?Error {
     const code = c.glfwGetError(null);
     return codeToError(code);
 }
 
 pub fn init() !void {
     if (c.glfwInit() == c.GLFW_FALSE) {
-        return getError();
+        return getError() orelse Error.Unknown;
     }
 }
 
 pub const terminate = c.glfwTerminate;
-
 pub const waitEvents = c.glfwWaitEvents;
-
 pub const postEmptyEvent = c.glfwPostEmptyEvent;
 
-pub fn hintWindowVisible(value: bool) void {
-    c.glfwWindowHint(c.GLFW_VISIBLE, @boolToInt(value));
-}
-
-pub fn hintWindowDecorated(value: bool) void {
-    c.glfwWindowHint(c.GLFW_DECORATED, @boolToInt(value));
-}
-
-pub fn hintWindowRefreshRate(value: i32) void {
-    c.glfwWindowHint(c.GLFW_REFRESH_RATE, value);
+pub fn hintWindowMaximized(value: bool) void {
+    c.glfwWindowHint(c.GLFW_MAXIMIZED, @boolToInt(value));
 }
 
 pub const JOYSTICK_COUNT = c.GLFW_JOYSTICK_LAST + 1;
@@ -106,18 +95,16 @@ pub const JoyButtonState = enum(u8) {
     _,
 };
 extern fn glfwGetJoystickButtons(jid: c_int, count: [*c]c_int) [*c]const JoyButtonState;
-pub fn getJoystickButtons(jid: i32) ?[]const JoyButtonState {
+pub fn getJoystickButtons(jid: i32) !?[]const JoyButtonState {
     var count: i32 = 0;
-    const ptr = glfwGetJoystickButtons(jid, &count) orelse return null;
-    const len = if (count >= std.math.minInt(usize) and count <= std.math.maxInt(usize)) @intCast(usize, count) else return null;
-    return ptr[0..len];
+    const ptr = glfwGetJoystickButtons(jid, &count) orelse return getError() orelse null;
+    return ptr[0..@intCast(usize, count)];
 }
 
-pub fn getJoystickAxes(jid: i32) ?[]const f32 {
+pub fn getJoystickAxes(jid: i32) !?[]const f32 {
     var count: i32 = 0;
-    const ptr = c.glfwGetJoystickAxes(jid, &count) orelse return null;
-    const len = if (count >= std.math.minInt(usize) and count <= std.math.maxInt(usize)) @intCast(usize, count) else return null;
-    return ptr[0..len];
+    const ptr = c.glfwGetJoystickAxes(jid, &count) orelse return getError() orelse null;
+    return ptr[0..@intCast(usize, count)];
 }
 
 pub const JoyHatState = enum(u8) {
@@ -133,15 +120,15 @@ pub const JoyHatState = enum(u8) {
     _,
 };
 extern fn glfwGetJoystickHats(jid: c_int, count: [*c]c_int) [*c]const JoyHatState;
-pub fn getJoystickHats(jid: i32) ?[]const JoyHatState {
+pub fn getJoystickHats(jid: i32) !?[]const JoyHatState {
     var count: i32 = 0;
-    const ptr = glfwGetJoystickHats(jid, &count) orelse return null;
-    const len = if (count >= std.math.minInt(usize) and count <= std.math.maxInt(usize)) @intCast(usize, count) else return null;
-    return ptr[0..len];
+    const ptr = glfwGetJoystickHats(jid, &count) orelse return getError() orelse null;
+    return ptr[0..@intCast(usize, count)];
 }
 
-pub fn getJoystickGuid(jid: i32) ?[]const u8 {
-    return std.mem.sliceTo(c.glfwGetJoystickGUID(jid), 0);
+pub fn getJoystickGuid(jid: i32) !?[]const u8 {
+    const ptr = c.glfwGetJoystickGUID(jid) orelse return getError() orelse null;
+    return std.mem.sliceTo(ptr, 0);
 }
 
 pub const Monitor = opaque {
@@ -151,31 +138,20 @@ pub const Monitor = opaque {
     extern fn glfwSetMonitorUserPointer(*Self, ?*anyopaque) void;
     extern fn glfwGetMonitorUserPointer(*Self) ?*anyopaque;
     extern fn glfwGetMonitorPos(*Self, *c_int, *c_int) void;
-    extern fn glfwGetVideoMode(*Self) ?*c.GLFWvidmode;
+    extern fn glfwGetMonitorWorkarea(*Self, *c_int, *c_int, *c_int, *c_int) void;
+    extern fn glfwGetMonitorContentScale(*Self, *f32, *f32) void;
     extern fn glfwGetVideoModes(*Self, *c_int) [*c]const c.GLFWvidmode;
+    extern fn glfwGetVideoMode(*Self) ?*c.GLFWvidmode;
 
     pub fn getPrimary() !*Self {
         return glfwGetPrimaryMonitor() orelse return error.Unknown;
     }
 
-    pub fn getAll() !Iterator {
+    pub fn getAll() ![]?*Self {
         var count: i32 = 0;
-        const handles = c.glfwGetMonitors(&count) orelse return error.Unknown;
-        return Iterator{ .ptr = @ptrCast([*]?*Self, handles), .len = @intCast(usize, count) };
+        const handles = c.glfwGetMonitors(&count) orelse return getError() orelse return Error.Unknown;
+        return @ptrCast([*]?*Self, handles)[0..@intCast(usize, count)];
     }
-
-    const Iterator = struct {
-        ptr: [*]?*Self,
-        len: usize,
-        idx: usize = 0,
-
-        pub fn next(iter: *Iterator) ?*Self {
-            if (iter.idx >= iter.len) return null;
-            const p = iter.ptr[iter.idx] orelse return null;
-            iter.idx += 1;
-            return p;
-        }
-    };
 
     pub fn setUserPointer(self: *Self, comptime T: type, pointer: ?*T) void {
         glfwSetMonitorUserPointer(self, pointer);
@@ -190,44 +166,35 @@ pub const Monitor = opaque {
         return std.mem.sliceTo(c.glfwGetMonitorName(self), 0);
     }
 
-    pub fn getPos(self: *Self) Point {
+    pub fn getPos(self: *Self) !Point {
         var xpos: i32 = 0;
         var ypos: i32 = 0;
         glfwGetMonitorPos(self, &xpos, &ypos);
-        return .{ .x = xpos, .y = ypos };
+        return getError() orelse .{ .x = xpos, .y = ypos };
     }
 
-    pub fn getCurrentVideoMode(self: *Self) !VideoMode {
-        const p_mode = glfwGetVideoMode(self) orelse return error.Unknown;
-        return modeFromGlfw(p_mode.*);
+    pub fn getWorkarea(self: *Self) !Rectangle {
+        var xpos: i32 = 0;
+        var ypos: i32 = 0;
+        var width: i32 = 0;
+        var height: i32 = 0;
+        glfwGetMonitorWorkarea(self, &xpos, &ypos, &width, &height);
+        return getError() orelse .{ .pos = .{ .x = xpos, .y = ypos }, .size = .{ .w = width, .h = height } };
     }
 
-    pub fn getAllVideoModes(self: *Self) !ModeIterator {
-        var count: i32 = 0;
-        const modes = glfwGetVideoModes(self, &count) orelse return error.Unknown;
-        return ModeIterator{ .ptr = modes, .len = @intCast(usize, count) };
-    }
-
-    const ModeIterator = struct {
-        ptr: [*c]const c.GLFWvidmode,
-        len: usize,
-        idx: usize = 0,
-
-        pub fn next(iter: *ModeIterator) ?VideoMode {
-            if (iter.idx >= iter.len) return null;
-            const mode = iter.ptr[iter.idx];
-            iter.idx += 1;
-            return modeFromGlfw(mode);
-        }
+    pub const Scale = struct {
+        xscale: f32,
+        yscale: f32,
     };
+    pub fn getContentScale(self: *Self) !Scale {
+        var xscale: f32 = 0;
+        var yscale: f32 = 0;
+        glfwGetMonitorContentScale(self, &xscale, &yscale);
+        return getError() orelse .{ .xscale = xscale, .yscale = yscale };
+    }
 
-    fn modeFromGlfw(mode: c.GLFWvidmode) VideoMode {
-        const w = if (mode.width < 0) 0 else mode.width;
-        const h = if (mode.height < 0) 0 else mode.height;
-        return VideoMode{
-            .size = .{ .w = @intCast(u31, w), .h = @intCast(u31, h) },
-            .refresh_rate = mode.refreshRate,
-        };
+    pub fn getVideoMode(self: *Self) !*c.GLFWvidmode {
+        return glfwGetVideoMode(self) orelse return error.Unknown;
     }
 };
 
@@ -253,7 +220,7 @@ pub const Window = opaque {
     extern fn glfwGetWindowMonitor(*Self) ?*Monitor;
 
     pub fn create(size: Size, title: [:0]const u8, monitor: ?*Monitor, share: ?*Self) !*Self {
-        return glfwCreateWindow(size.w, size.h, title.ptr, monitor, share) orelse getError();
+        return glfwCreateWindow(size.w, size.h, title.ptr, monitor, share) orelse (getError() orelse Error.Unknown);
     }
 
     pub fn destroy(self: *Self) void {
@@ -287,11 +254,10 @@ pub const Window = opaque {
     }
 
     pub fn getPos(self: *Self) !Point {
-        var x: i32 = 0;
-        var y: i32 = 0;
-        glfwGetWindowPos(self, &x, &y);
-        const err = getError();
-        if (err == Error.NoError) return .{ .x = x, .y = y } else return err;
+        var xpos: i32 = 0;
+        var ypos: i32 = 0;
+        glfwGetWindowPos(self, &xpos, &ypos);
+        return getError() orelse .{ .x = xpos, .y = ypos };
     }
 
     pub fn setPos(self: *Self, pos: Point) void {
@@ -299,13 +265,10 @@ pub const Window = opaque {
     }
 
     pub fn getSize(self: *Self) !Size {
-        var w: i32 = 0;
-        var h: i32 = 0;
-        glfwGetWindowSize(self, &w, &h);
-        const err = getError();
-        if (w < 0) w = 0;
-        if (h < 0) h = 0;
-        if (err == Error.NoError) return .{ .w = @intCast(u31, w), .h = @intCast(u31, h) } else return err;
+        var width: i32 = 0;
+        var height: i32 = 0;
+        glfwGetWindowSize(self, &width, &height);
+        return getError() orelse .{ .w = width, .h = height };
     }
 
     pub fn setSize(self: *Self, size: Size) void {
@@ -333,13 +296,10 @@ pub const Window = opaque {
     }
 
     pub fn getFramebufferSize(self: *Self) !Size {
-        var w: i32 = 0;
-        var h: i32 = 0;
-        glfwGetFramebufferSize(self, &w, &h);
-        const err = getError();
-        if (w < 0) w = 0;
-        if (h < 0) h = 0;
-        if (err == Error.NoError) return .{ .w = @intCast(u31, w), .h = @intCast(u31, h) } else return err;
+        var width: i32 = 0;
+        var height: i32 = 0;
+        glfwGetFramebufferSize(self, &width, &height);
+        return getError() orelse .{ .w = width, .h = height };
     }
 
     pub fn getFullscreenMonitor(self: *Self) ?*Monitor {
@@ -427,8 +387,7 @@ pub const Window = opaque {
         return struct {
             fn value(window: ?*Self, width: c_int, height: c_int) callconv(.C) void {
                 const obj = getUserObj(window, T) orelse return;
-                if (width < 0 or height < 0) return;
-                callback(obj, .{ .w = @intCast(u31, width), .h = @intCast(u31, height) });
+                callback(obj, .{ .w = width, .h = height });
             }
         };
     }
