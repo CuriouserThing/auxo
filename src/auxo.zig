@@ -346,7 +346,7 @@ pub const App = struct {
         self.queued_mode_change = .{ .turn_fullscreen_off = {} };
     }
 
-    fn changeMode(self: *Self, mode_change: ModeChange) !void {
+    fn changeMode(self: *Self, mode_change: ModeChange) glfw.Error!void {
         switch (mode_change) {
             .none => return,
             .toggle_fullscreen => |mode| {
@@ -539,17 +539,21 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
                 render_thread.join();
             }
 
+            // Swallow GLFW errors inside loop and rely on GLFW error callback for logging
             while (!self.app.should_close and !render_loop_aborted) {
-                // Swallow GLFW errors and rely on GLFW error callback for logging
+                // 1. Dispatch display state changes
                 self.readMonitors() catch {};
 
+                // 2. Dispatch joystick state changes
                 var jid: i32 = 0;
                 while (jid < glfw.JOYSTICK_COUNT) : (jid += 1) {
                     self.readJoystick(jid) catch {};
                 }
 
+                // 3. Run an update if needed
                 self.update();
 
+                // 4. Process queued app state changes
                 var mode_change: App.ModeChange = undefined;
                 {
                     self.input_lock.lock();
@@ -560,6 +564,7 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
                 }
                 self.app.changeMode(mode_change) catch {};
 
+                // 5. Wait for a message
                 glfw.waitEvents();
             }
         }
