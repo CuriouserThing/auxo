@@ -1012,7 +1012,7 @@ fn getDisplayInfo(monitor: *Monitor) glfw.Error!DisplayInfo {
         .display_area = .{ .size = size, .pos = pos },
         .work_area = work_area,
         .refresh_rate = @intToFloat(f32, vm.refreshRate),
-        .scale_factor = scale.xscale,
+        .scale_factor = @min(scale.xscale, scale.yscale),
     };
 }
 
