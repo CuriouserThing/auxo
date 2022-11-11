@@ -44,8 +44,7 @@ pub fn Model(comptime WorldState: type, comptime IoState: type, comptime AudioSt
         world_config: WorldConfig,
         event_handler: EventHandler(IoState),
 
-        createWindowFn: fn ([]DisplayInfo) WindowCreationState,
-
+        createWindowFn: fn (*IoState, []DisplayInfo) WindowCreationState,
         initFn: ?fn (*const App, *WorldState, *IoState, *AudioState, *VideoState) anyerror!void = null,
         initVideoFn: ?fn (*const App, *VideoState) anyerror!void = null,
         deinitVideoFn: ?fn (*VideoState) void = null,
@@ -195,7 +194,7 @@ pub fn run(
         display_buffer[i] = try getDisplayInfo(monitor.?);
     }
 
-    const creation_state = model.createWindowFn(display_buffer[0..display_count]);
+    const creation_state = model.createWindowFn(io_state, display_buffer[0..display_count]);
     glfw.hintWindowMaximized(creation_state.maximized);
     var maybe_mon: ?*Monitor = null;
 
