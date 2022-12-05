@@ -50,6 +50,8 @@ pub fn Model(comptime WorldState: type, comptime IoState: type, comptime AudioSt
         deinitVideoFn: ?fn (*VideoState) void = null,
         deinitFn: ?fn (*WorldState, *IoState, *AudioState, *VideoState) void = null,
 
+        networkSendFn: ?fn (*IoState) void = null,
+        networkReceiveFn: ?fn (*IoState) void = null,
         beginUpdateFn: fn (*const IoState, *WorldState) void,
         stepFn: fn (*WorldState) void,
         endUpdateFn: fn (*const WorldState, *IoState, *App, UpdateReport) void,
@@ -590,6 +592,13 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
         }
 
         fn update(self: *Self) void {
+            if (model.networkSendFn) |f| {
+                self.input_lock.lock();
+                defer self.input_lock.unlock();
+
+                f(self.io_state);
+            }
+
             var timestamp = self.timer.read();
             var world_delta = timestamp - @atomicLoad(u64, &self.world_timestamp, .SeqCst);
             if (world_delta < ticks_per_step) return;
@@ -606,6 +615,10 @@ fn Game(comptime WorldState: type, comptime IoState: type, comptime AudioState: 
                 {
                     self.input_lock.lock();
                     defer self.input_lock.unlock();
+
+                    if (model.networkReceiveFn) |f| {
+                        f(self.io_state);
+                    }
 
                     model.beginUpdateFn(self.io_state, self.world_state);
                 }
