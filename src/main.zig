@@ -35,6 +35,7 @@ pub const JOY_BUTTON_MAX = io.JOY_BUTTON_MAX;
 pub const JOY_AXIS_MAX = io.JOY_AXIS_MAX;
 pub const JOY_HAT_MAX = io.JOY_HAT_MAX;
 
+const netcode = @import("netcode");
 const glfw = @import("glfw.zig");
 const Monitor = glfw.Monitor;
 const Window = glfw.Window;
@@ -182,6 +183,9 @@ pub fn run(
     audio_state: *AudioState,
     video_state: *VideoState,
 ) !void {
+    try netcode.init();
+    defer netcode.term();
+
     logGlfwVersion();
     glfw.setErrorCallback(onGlfwError);
 

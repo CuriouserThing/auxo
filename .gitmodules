@@ -1,0 +1,3 @@
+[submodule "lib/zig-netcode"]
+	path = lib/zig-netcode
+	url = https://github.com/CuriouserThing/zig-netcode.git
