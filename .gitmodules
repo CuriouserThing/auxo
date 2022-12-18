@@ -1,3 +1,6 @@
 [submodule "lib/zig-netcode"]
 	path = lib/zig-netcode
 	url = https://github.com/CuriouserThing/zig-netcode
+[submodule "lib/glfw"]
+	path = lib/glfw
+	url = https://github.com/glfw/glfw
