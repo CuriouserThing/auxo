@@ -4,3 +4,6 @@
 [submodule "lib/glfw"]
 	path = lib/glfw
 	url = https://github.com/glfw/glfw
+[submodule "lib/lib/zig-gamedev"]
+	path = lib/lib/zig-gamedev
+	url = https://github.com/michal-z/zig-gamedev
