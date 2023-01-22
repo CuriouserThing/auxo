@@ -246,9 +246,9 @@ pub const JoyState = struct {
     const Self = @This();
     const ACTUATION_THRESHOLD = 0.5;
 
-    buttons: []JoyButtonState,
-    axes: []f32,
-    hats: []JoyHatDirection,
+    buttons: []const JoyButtonState,
+    axes: []const f32,
+    hats: []const JoyHatDirection,
 
     // =================================================================================================================
     // JOY GETTERS
