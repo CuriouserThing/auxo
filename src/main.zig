@@ -96,6 +96,7 @@ pub fn LoopbackServerTable(comptime LoopbackServer: type) type {
 }
 
 pub const FrameInfo = struct {
+    texture_view: zgpu.wgpu.TextureView,
     step_remainder: f64 = 0.0,
     estimated_fps: ?f64 = null,
 };
@@ -741,8 +742,12 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
 
                     self.update(game);
 
+                    var texture_view = graphics.swapchain.getCurrentTextureView();
+                    defer texture_view.release();
+
                     const delta_ticks = self.timer.read() - self.world_timestamp;
                     const frame_info = FrameInfo{
+                        .texture_view = texture_view,
                         .step_remainder = @intToFloat(f64, delta_ticks) / @intToFloat(f64, ticks_per_step),
                         .estimated_fps = estimated_fps,
                     };
