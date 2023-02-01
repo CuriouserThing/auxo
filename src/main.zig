@@ -54,37 +54,44 @@ pub fn GameTable(comptime Game: type) type {
         max_step_delay: Seconds = 1.0,
 
         // Methods
-        step: fn (*Game, *App) void,
-        skipSteps: fn (*Game, *App, usize) void,
-        draw: fn (*Game, *App, *zgpu.GraphicsContext, FrameInfo) void,
-        onSwapchainResized: fn (*Game, *App, *zgpu.GraphicsContext, Size) void,
-        receiveCloseRequest: fn (*Game, *App, CloseRequestArgs) void,
-        receiveFocusState: fn (*Game, *App, FocusStateArgs) void,
-        receiveIconifyState: fn (*Game, *App, IconifyStateArgs) void,
-        receiveKeyAction: fn (*Game, *App, KeyActionArgs) void,
-        receiveCharInput: fn (*Game, *App, CharInputArgs) void,
-        receiveMouseButtonAction: fn (*Game, *App, MouseButtonActionArgs) void,
-        receiveMouseScroll: fn (*Game, *App, MouseScrollArgs) void,
-        receiveCursorPosition: fn (*Game, *App, CursorPositionArgs) void,
-        receiveCursorEntryState: fn (*Game, *App, CursorEntryStateArgs) void,
-        receiveJoyState: fn (*Game, *App, JoyStateArgs) void,
-        receiveDisplayState: fn (*Game, *App, DisplayStateArgs) void,
-        receiveServerData: fn (*Game, *App, ServerDataArgs) void,
+        step: fn (*Game, *AppContext) void,
+        skipSteps: fn (*Game, *AppContext, usize) void,
+        draw: fn (*Game, *AppContext, *zgpu.GraphicsContext, FrameInfo) void,
+        onSwapchainResized: fn (*Game, *AppContext, *zgpu.GraphicsContext, Size) void,
+        receiveCloseRequest: fn (*Game, *AppContext, CloseRequestArgs) void,
+        receiveFocusState: fn (*Game, *AppContext, FocusStateArgs) void,
+        receiveIconifyState: fn (*Game, *AppContext, IconifyStateArgs) void,
+        receiveKeyAction: fn (*Game, *AppContext, KeyActionArgs) void,
+        receiveCharInput: fn (*Game, *AppContext, CharInputArgs) void,
+        receiveMouseButtonAction: fn (*Game, *AppContext, MouseButtonActionArgs) void,
+        receiveMouseScroll: fn (*Game, *AppContext, MouseScrollArgs) void,
+        receiveCursorPosition: fn (*Game, *AppContext, CursorPositionArgs) void,
+        receiveCursorEntryState: fn (*Game, *AppContext, CursorEntryStateArgs) void,
+        receiveJoyState: fn (*Game, *AppContext, JoyStateArgs) void,
+        receiveDisplayState: fn (*Game, *AppContext, DisplayStateArgs) void,
+        receiveServerData: fn (*Game, *AppContext, ServerDataArgs) void,
     };
 }
 
-pub fn Table(comptime Context: type, comptime Game: type) type {
+pub fn ClientTable(comptime Client: type, comptime Game: type) type {
     return struct {
         // Config
         use_imgui: bool = false,
 
         // Methods
-        createWindow: fn (*Context, []DisplayInfo) anyerror!WindowCreationState,
-        init: fn (*Context, *App, *zgpu.GraphicsContext) anyerror!Game,
-        deinit: fn (*Context, *const App, *Game) void,
+        createWindow: fn (*Client, []DisplayInfo) anyerror!WindowCreationState,
+        init: fn (*Client, *AppContext, *zgpu.GraphicsContext) anyerror!Game,
+        deinit: fn (*Client, *const AppContext, *Game) void,
 
         // Inner
         game_table: GameTable(Game),
+    };
+}
+
+pub fn LoopbackServerTable(comptime LoopbackServer: type) type {
+    return struct {
+        // Methods
+        run: fn (*LoopbackServer, *LoopbackContext) void,
     };
 }
 
@@ -167,18 +174,12 @@ pub const ServerDataArgs = struct {
 
 // ====================================================================================================================
 
-pub fn ServerTable(comptime Server: type) type {
-    return struct {
-        run: fn (*Server, *ServerContext) void,
-    };
-}
-
-const Packet = struct {
+pub const Packet = struct {
     data: []u8,
     sequence: u64,
 };
 
-pub const ServerContext = struct {
+pub const LoopbackContext = struct {
     const MAX_INCOMING_PACKETS = 64;
     const MAX_OUTGOING_PACKETS = 64;
 
@@ -188,28 +189,28 @@ pub const ServerContext = struct {
     incoming_packet_buffer: [MAX_INCOMING_PACKETS][netcode.MAX_PACKET_SIZE]u8 = [_][netcode.MAX_PACKET_SIZE]u8{[_]u8{0} ** netcode.MAX_PACKET_SIZE} ** MAX_INCOMING_PACKETS,
     outgoing_packets: RingBuffer(MAX_OUTGOING_PACKETS, Packet) = .{},
     outgoing_packet_buffer: [MAX_OUTGOING_PACKETS][netcode.MAX_PACKET_SIZE]u8 = [_][netcode.MAX_PACKET_SIZE]u8{[_]u8{0} ** netcode.MAX_PACKET_SIZE} ** MAX_OUTGOING_PACKETS,
-    packet_sequence: u64 = 0,
+    outgoing_packet_sequence: u64 = 0,
 
-    pub fn clientActive(self: *ServerContext) bool {
+    pub fn clientActive(self: *LoopbackContext) bool {
         return self.client_active;
     }
 
-    pub fn clientConnected(self: *ServerContext) bool {
+    pub fn clientConnected(self: *LoopbackContext) bool {
         return self.client_connected;
     }
 
-    pub fn sendPacket(self: *ServerContext, packet_data: []u8) void {
+    pub fn sendPacket(self: *LoopbackContext, packet_data: []u8) void {
         const len = @max(packet_data.len, netcode.MAX_PACKET_SIZE);
         var new_packet_data = self.outgoing_packet_buffer[self.outgoing_packets.head][0..len];
         std.mem.copy(u8, new_packet_data, packet_data);
         self.outgoing_packets.write(Packet{
             .data = new_packet_data,
-            .sequence = self.packet_sequence,
+            .sequence = self.outgoing_packet_sequence,
         });
-        self.packet_sequence += 1;
+        self.outgoing_packet_sequence += 1;
     }
 
-    pub fn receivePacket(self: *ServerContext) ?Packet {
+    pub fn receivePacket(self: *LoopbackContext) ?Packet {
         // Release previous read first, if needed
         // We invert the read and release so the library user doesn't need to call a "freePacket" sort of method
         // This approach is organic in a standard `while (ctx.receivePacket()) |packet|` loop
@@ -217,15 +218,15 @@ pub const ServerContext = struct {
         return self.incoming_packets.readWithoutRelease();
     }
 
-    fn connectClient(self: *ServerContext) void {
+    fn connectClient(self: *LoopbackContext) void {
         self.client_connected = true;
     }
 
-    fn disconnectClient(self: *ServerContext) void {
+    fn disconnectClient(self: *LoopbackContext) void {
         self.client_connected = false;
     }
 
-    fn sendPacketToServer(self: *ServerContext, packet_data: []u8, packet_sequence: u64) void {
+    fn sendPacketToServer(self: *LoopbackContext, packet_data: []u8, packet_sequence: u64) void {
         const len = @max(packet_data.len, netcode.MAX_PACKET_SIZE);
         var new_packet_data = self.incoming_packet_buffer[self.incoming_packets.head][0..len];
         std.mem.copy(u8, new_packet_data, packet_data);
@@ -235,58 +236,58 @@ pub const ServerContext = struct {
         });
     }
 
-    fn processPacketsFromServer(self: *ServerContext, client: *netcode.Client) void {
+    fn processPacketsFromServer(self: *LoopbackContext, client: *netcode.Client) void {
         // netcode_process_loopback_packet will memcpy the packet, after which we free the memory
         while (self.outgoing_packets.readWithoutRelease()) |packet| {
             defer self.outgoing_packets.releasePreviousRead();
             client.processLoopbackPacket(packet.data, packet.sequence);
         }
     }
+
+    fn sendLoopbackPacketCallback(context: ?*anyopaque, _: c_int, packet_data: [*c]u8, packet_bytes: c_int, packet_sequence: u64) callconv(.C) void {
+        if (context) |ctx| {
+            const loopback = @ptrCast(*LoopbackContext, @alignCast(@alignOf(*LoopbackContext), ctx));
+            loopback.sendPacketToServer(packet_data[0..@intCast(usize, packet_bytes)], packet_sequence);
+        }
+    }
 };
 
-fn sendLoopbackPacketToServer(context: ?*anyopaque, _: c_int, packet_data: [*c]u8, packet_bytes: c_int, packet_sequence: u64) callconv(.C) void {
-    if (context) |ctx| {
-        const server_ctx = @ptrCast(*ServerContext, @alignCast(@alignOf(*ServerContext), ctx));
-        server_ctx.sendPacketToServer(packet_data[0..@intCast(usize, packet_bytes)], packet_sequence);
-    }
-}
-
 pub fn runLoopback(
-    comptime Context: type,
+    comptime Client: type,
     comptime Game: type,
-    comptime table: Table(Context, Game),
-    comptime Server: type,
-    comptime server_table: ServerTable(Server),
-    context: *Context,
-    server: *Server,
+    comptime client_table: ClientTable(Client, Game),
+    client: *Client,
+    comptime LoopbackServer: type,
+    comptime loopback_server_table: LoopbackServerTable(LoopbackServer),
+    loopback_server: *LoopbackServer,
     allocator: Allocator,
 ) !void {
-    var server_ctx = ServerContext{};
-    const server_thread = try std.Thread.spawn(.{}, server_table.run, .{ server, &server_ctx });
+    var loopback = LoopbackContext{};
+    const server_thread = try std.Thread.spawn(.{}, loopback_server_table.run, .{ loopback_server, &loopback });
     defer server_thread.join();
 
-    try runInternal(Context, Game, table, context, allocator, &server_ctx);
+    try runInternal(Client, Game, client_table, client, allocator, &loopback);
 
-    server_ctx.client_active = false;
+    loopback.client_active = false;
 }
 
 pub fn run(
-    comptime Context: type,
+    comptime Client: type,
     comptime Game: type,
-    comptime table: Table(Context, Game),
-    context: *Context,
+    comptime client_table: ClientTable(Client, Game),
+    client: *Client,
     allocator: Allocator,
 ) !void {
-    try runInternal(Context, Game, table, context, allocator, null);
+    try runInternal(Client, Game, client_table, client, allocator, null);
 }
 
 fn runInternal(
-    comptime Context: type,
+    comptime Client: type,
     comptime Game: type,
-    comptime table: Table(Context, Game),
-    context: *Context,
+    comptime client_table: ClientTable(Client, Game),
+    client: *Client,
     allocator: Allocator,
-    server_ctx: ?*ServerContext,
+    loopback: ?*LoopbackContext,
 ) !void {
     // =========================================================================
     // NETCODE
@@ -296,10 +297,10 @@ fn runInternal(
 
     var ip = [_:0]u8{ ':', ':' };
     var client_config = netcode.defaultClientConfig();
-    client_config.callback_context = server_ctx orelse null;
-    client_config.send_loopback_packet_callback = sendLoopbackPacketToServer;
-    var client = netcode.Client.create(&ip, &client_config, 0) orelse return;
-    defer client.destroy();
+    client_config.callback_context = loopback orelse null;
+    client_config.send_loopback_packet_callback = LoopbackContext.sendLoopbackPacketCallback;
+    var netcode_client = netcode.Client.create(&ip, &client_config, 0) orelse return;
+    defer netcode_client.destroy();
 
     // =========================================================================
     // ZAUDIO
@@ -327,7 +328,7 @@ fn runInternal(
         display_buffer[i] = try getDisplayInfo(monitor.?);
     }
 
-    const creation_state = try table.createWindow(context, display_buffer[0..display_count]);
+    const creation_state = try client_table.createWindow(client, display_buffer[0..display_count]);
     glfw.hintWindowMaximized(creation_state.maximized);
     var maybe_mon: ?*Monitor = null;
 
@@ -350,11 +351,11 @@ fn runInternal(
     var window = try Window.create(creation_size, creation_state.title, creation_mon, null);
     defer window.destroy();
 
-    var app: App = .{
+    var app: AppContext = .{
         .window = window,
         .audio_engine = audio_engine,
-        .client = client,
-        .server_context = server_ctx,
+        .netcode_client = netcode_client,
+        .loopback = loopback,
         .restored_pos = window.getPos() catch Point.zero,
         .restored_size = creation_state.restored_size,
         .was_maximized = creation_state.maximized,
@@ -371,17 +372,17 @@ fn runInternal(
 
     // This cast should be our only point of interface with zglfw
     var zwindow = @ptrCast(*@import("zglfw").Window, window);
-    var gctx = try zgpu.GraphicsContext.create(allocator, zwindow);
-    defer gctx.destroy(allocator);
+    var graphics = try zgpu.GraphicsContext.create(allocator, zwindow);
+    defer graphics.destroy(allocator);
 
-    const h = gctx.swapchain_descriptor.height;
-    const w = gctx.swapchain_descriptor.width;
+    const h = graphics.swapchain_descriptor.height;
+    const w = graphics.swapchain_descriptor.width;
     const swapchain_size = (@intCast(u64, w) << 32) | (@intCast(u64, h));
 
-    const E = Engine(Game, table.game_table);
+    const E = Engine(Game, client_table.game_table);
     var engine = E{
         .app = &app,
-        .graphics_context = gctx,
+        .graphics = graphics,
         .swapchain_size = swapchain_size,
         .framebuffer_size = swapchain_size,
         .timer = try Timer.start(),
@@ -411,34 +412,34 @@ fn runInternal(
     // =========================================================================
     // ZGUI
 
-    if (table.use_imgui) {
+    if (client_table.use_imgui) {
         zgui.init(allocator);
         zgui.backend.init(
             zwindow,
-            gctx.device,
+            graphics.device,
             @enumToInt(zgpu.GraphicsContext.swapchain_format),
         );
     }
-    defer if (table.use_imgui) {
+    defer if (client_table.use_imgui) {
         zgui.backend.deinit();
         zgui.deinit();
     };
 
     // =========================================================================
 
-    var game = try table.init(context, &app, gctx);
-    defer table.deinit(context, &app, &game);
+    var game = try client_table.init(client, &app, graphics);
+    defer client_table.deinit(client, &app, &game);
 
     try engine.eventLoop(&game);
 }
 
-pub const App = struct {
+pub const AppContext = struct {
     const Self = @This();
 
     window: *Window,
     audio_engine: *zaudio.Engine,
-    client: *netcode.Client,
-    server_context: ?*ServerContext,
+    netcode_client: *netcode.Client,
+    loopback: ?*LoopbackContext,
 
     // Cached state
     restored_pos: Point,
@@ -452,23 +453,23 @@ pub const App = struct {
 
     pub fn connectToServer(self: *Self, connect_token: ?*[netcode.CONNECT_TOKEN_BYTES]u8) void {
         if (connect_token) |token| {
-            self.client.connect(token);
+            self.netcode_client.connect(token);
         } else {
-            self.client.connectLoopback(0, 1);
-            if (self.server_context) |server_ctx| {
-                server_ctx.connectClient();
+            self.netcode_client.connectLoopback(0, 1);
+            if (self.loopback) |loopback| {
+                loopback.connectClient();
             }
         }
     }
 
     pub fn disconnectFromServer(self: *Self) void {
-        if (self.client.loopback()) {
-            if (self.server_context) |server_ctx| {
-                server_ctx.disconnectClient();
+        if (self.netcode_client.loopback()) {
+            if (self.loopback) |loopback| {
+                loopback.disconnectClient();
             }
-            self.client.disconnectLoopback();
+            self.netcode_client.disconnectLoopback();
         } else {
-            self.client.disconnect();
+            self.netcode_client.disconnect();
         }
     }
 
@@ -644,8 +645,8 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
     return struct {
         const Self = @This();
 
-        app: *App,
-        graphics_context: *zgpu.GraphicsContext,
+        app: *AppContext,
+        graphics: *zgpu.GraphicsContext,
         swapchain_size: u64,
         framebuffer_size: u64,
         timer: Timer,
@@ -680,7 +681,7 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                 var joy_states_changed = [_]bool{false} ** glfw.JOYSTICK_COUNT;
                 for (joysticks) |_, i| joy_states_changed[i] = joysticks[i].stateChanged() catch false;
 
-                var mode_change: App.ModeChange = undefined;
+                var mode_change: AppContext.ModeChange = undefined;
 
                 {
                     self.game_lock.lock();
@@ -714,16 +715,16 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
             var frame_tracker: FrameTracker(60, 240) = .{ .timer = timer };
 
             while (!event_loop_broken.*) {
-                const gctx = self.graphics_context;
+                const graphics = self.graphics;
                 const fb = @atomicLoad(u64, &self.framebuffer_size, .SeqCst);
                 const fb_size: Size = .{ .w = @intCast(u31, (fb >> 32) & std.math.maxInt(u31)), .h = @intCast(u31, fb & std.math.maxInt(u31)) };
                 const swapchain_resized = self.swapchain_size != fb;
                 if (swapchain_resized) {
                     self.swapchain_size = fb;
-                    gctx.swapchain_descriptor.width = @intCast(u32, fb_size.w);
-                    gctx.swapchain_descriptor.height = @intCast(u32, fb_size.h);
-                    gctx.swapchain.release();
-                    gctx.swapchain = gctx.device.createSwapChain(gctx.surface, gctx.swapchain_descriptor);
+                    graphics.swapchain_descriptor.width = @intCast(u32, fb_size.w);
+                    graphics.swapchain_descriptor.height = @intCast(u32, fb_size.h);
+                    graphics.swapchain.release();
+                    graphics.swapchain = graphics.device.createSwapChain(graphics.surface, graphics.swapchain_descriptor);
 
                     frame_tracker.reset();
                 }
@@ -735,7 +736,7 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                     defer self.game_lock.unlock();
 
                     if (swapchain_resized) {
-                        table.onSwapchainResized(game, self.app, gctx, fb_size);
+                        table.onSwapchainResized(game, self.app, graphics, fb_size);
                     }
 
                     self.update(game);
@@ -745,11 +746,11 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                         .step_remainder = @intToFloat(f64, delta_ticks) / @intToFloat(f64, ticks_per_step),
                         .estimated_fps = estimated_fps,
                     };
-                    table.draw(game, self.app, gctx, frame_info);
+                    table.draw(game, self.app, graphics, frame_info);
                 }
 
                 glfw.postEmptyEvent();
-                gctx.swapchain.present();
+                graphics.swapchain.present();
                 frame_tracker.startOrLap();
             }
         }
@@ -769,16 +770,16 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                 }
             }
 
-            if (self.app.server_context) |server_ctx| {
-                server_ctx.processPacketsFromServer(self.app.client);
+            if (self.app.loopback) |loopback| {
+                loopback.processPacketsFromServer(self.app.netcode_client);
             }
             var packet_sequence: u64 = undefined;
-            while (self.app.client.receivePacket(&packet_sequence) catch null) |data| {
+            while (self.app.netcode_client.receivePacket(&packet_sequence) catch null) |data| {
                 table.receiveServerData(game, self.app, .{
                     .data = data,
                     .sequence = packet_sequence,
                 });
-                self.app.client.freePacket(data);
+                self.app.netcode_client.freePacket(data);
             }
 
             var timestamp = self.timer.read();
