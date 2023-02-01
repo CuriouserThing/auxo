@@ -80,7 +80,7 @@ pub fn ClientTable(comptime Client: type, comptime Game: type) type {
 
         // Methods
         createWindow: fn (*Client, []DisplayInfo) anyerror!WindowCreationState,
-        init: fn (*Client, *AppContext, *zgpu.GraphicsContext) anyerror!Game,
+        init: fn (*Client, *AppContext, *zgpu.GraphicsContext) anyerror!*Game,
         deinit: fn (*Client, *const AppContext, *Game) void,
 
         // Inner
@@ -428,9 +428,9 @@ fn runInternal(
     // =========================================================================
 
     var game = try client_table.init(client, &app, graphics);
-    defer client_table.deinit(client, &app, &game);
+    defer client_table.deinit(client, &app, game);
 
-    try engine.eventLoop(&game);
+    try engine.eventLoop(game);
 }
 
 pub const AppContext = struct {
