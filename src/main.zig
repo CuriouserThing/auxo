@@ -732,6 +732,14 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
 
                 const estimated_fps = frame_tracker.estimateFps();
 
+                zgui.backend.newFrame(
+                    graphics.swapchain_descriptor.width,
+                    graphics.swapchain_descriptor.height,
+                );
+
+                var texture_view = graphics.swapchain.getCurrentTextureView();
+                defer texture_view.release();
+
                 {
                     self.game_lock.lock();
                     defer self.game_lock.unlock();
@@ -742,9 +750,6 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
 
                     self.update(game);
 
-                    var texture_view = graphics.swapchain.getCurrentTextureView();
-                    defer texture_view.release();
-
                     const delta_ticks = self.timer.read() - self.world_timestamp;
                     const frame_info = FrameInfo{
                         .texture_view = texture_view,
@@ -752,6 +757,37 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                         .estimated_fps = estimated_fps,
                     };
                     table.draw(game, self.app, graphics, frame_info);
+                }
+
+                {
+                    const gui_commands = commands: {
+                        const encoder = graphics.device.createCommandEncoder(null);
+                        defer encoder.release();
+
+                        {
+                            const color_attachments = [_]zgpu.wgpu.RenderPassColorAttachment{.{
+                                .view = texture_view,
+                                .load_op = .load,
+                                .store_op = .store,
+                            }};
+                            const descriptor = zgpu.wgpu.RenderPassDescriptor{
+                                .color_attachment_count = color_attachments.len,
+                                .color_attachments = &color_attachments,
+                            };
+                            const pass = encoder.beginRenderPass(descriptor);
+                            defer {
+                                pass.end();
+                                pass.release();
+                            }
+
+                            zgui.backend.draw(pass);
+                        }
+
+                        break :commands encoder.finish(null);
+                    };
+                    defer gui_commands.release();
+
+                    graphics.submit(&.{gui_commands});
                 }
 
                 glfw.postEmptyEvent();
