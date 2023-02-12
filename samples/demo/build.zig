@@ -1,15 +1,19 @@
 const std = @import("std");
 const auxo = @import("../../build.zig");
 
-pub fn build(b: *std.build.Builder) void {
+pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const mode = b.standardReleaseOptions();
+    const optimize = b.standardOptimizeOption(.{});
 
-    const exe = b.addExecutable("auxo-demo", src() ++ "/src/main.zig");
-    exe.setTarget(target);
-    exe.setBuildMode(mode);
-    auxo.linkTo(exe) catch unreachable;
-    auxo.addTo(exe, "auxo");
+    const exe = b.addExecutable(.{
+        .name = "auxo-demo",
+        .root_source_file = .{ .path = src() ++ "/src/main.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    const auxo_package = auxo.Package.build(b, target, optimize) catch unreachable;
+    auxo_package.linkTo(exe) catch unreachable;
+    exe.addModule("auxo", auxo_package.module);
     exe.install();
 
     const run_cmd = exe.run();
@@ -21,9 +25,11 @@ pub fn build(b: *std.build.Builder) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const exe_tests = b.addTest(src() ++ "/src/main.zig");
-    exe_tests.setTarget(target);
-    exe_tests.setBuildMode(mode);
+    const exe_tests = b.addTest(.{
+        .root_source_file = .{ .path = src() ++ "src/main.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&exe_tests.step);

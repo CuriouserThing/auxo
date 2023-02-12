@@ -8,46 +8,59 @@ const zmath = @import("lib/zig-gamedev/libs/zmath/build.zig");
 const zaudio = @import("lib/zig-gamedev/libs/zaudio/build.zig");
 const demo = @import("samples/demo/build.zig");
 
-pub fn build(b: *std.build.Builder) void {
+pub fn build(b: *std.Build) void {
     demo.build(b);
 }
 
-pub fn linkTo(step: *std.build.LibExeObjStep) !void {
-    try netcode.linkTo(step);
+pub const Package = struct {
+    module: *std.Build.Module,
+    netcode_package: netcode.Package,
+    zglfw_package: zglfw.Package,
+    zgpu_package: zgpu.Package,
+    zgui_package: zgui.Package,
+    zaudio_package: zaudio.Package,
 
-    var b = step.builder;
-    zglfw.link(step);
-    zgpu.link(step, zgpuOptions(b));
-    zgui.link(step, zguiOptions(b));
-    zaudio.link(step);
-}
+    pub fn build(b: *std.Build, target: std.zig.CrossTarget, optimize: std.builtin.Mode) !Package {
+        const netcode_package = try netcode.Package.build(b, target, optimize);
+        const zglfw_package = zglfw.Package.build(b, target, optimize, .{});
+        const zgpu_package = zgpu.Package.build(b, .{
+            .deps = .{ .zglfw = zglfw_package.zglfw, .zpool = zpool.Package.build(b, .{}).zpool },
+        });
+        const zgui_package = zgui.Package.build(b, target, optimize, .{ .options = .{ .backend = .glfw_wgpu } });
+        const zaudio_package = zaudio.Package.build(b, target, optimize, .{});
 
-// Ideally we return a package here but there's a nasty corner case compiler memory ownership quirk
-pub fn addTo(step: *std.build.LibExeObjStep, pkg_name: []const u8) void {
-    var b = step.builder;
-    const zgpu_pkg = zgpu.getPkg(&.{ zgpuOptions(b).getPkg(), zpool.pkg, zglfw.pkg });
-    const zgui_pkg = zgui.getPkg(&.{zguiOptions(b).getPkg()});
-    const pkg = .{
-        .name = pkg_name,
-        .source = .{ .path = src() ++ "/src/main.zig" },
-        .dependencies = &[_]std.build.Pkg{
-            netcode.package("netcode"),
-            zgpu_pkg,
-            zgui_pkg,
-            zglfw.pkg,
-            zaudio.pkg,
-        },
-    };
-    step.addPackage(pkg);
-}
+        const module = b.createModule(.{
+            .source_file = .{ .path = src() ++ "/src/main.zig" },
+            .dependencies = &.{
+                .{ .name = "netcode", .module = netcode_package.module },
+                .{ .name = "zglfw", .module = zglfw_package.zglfw },
+                .{ .name = "zgpu", .module = zgpu_package.zgpu },
+                .{ .name = "zgui", .module = zgui_package.zgui },
+                .{ .name = "zaudio", .module = zaudio_package.zaudio },
+                .{ .name = "zmath", .module = zmath.Package.build(b, .{}).zmath },
+            },
+        });
 
-fn zgpuOptions(b: *std.build.Builder) zgpu.BuildOptionsStep {
-    return zgpu.BuildOptionsStep.init(b, .{});
-}
+        return Package{
+            .module = module,
+            .netcode_package = netcode_package,
+            .zglfw_package = zglfw_package,
+            .zgpu_package = zgpu_package,
+            .zgui_package = zgui_package,
+            .zaudio_package = zaudio_package,
+        };
+    }
 
-fn zguiOptions(b: *std.build.Builder) zgui.BuildOptionsStep {
-    return zgui.BuildOptionsStep.init(b, .{ .backend = .glfw_wgpu });
-}
+    pub fn linkTo(package: Package, exe: *std.Build.CompileStep) !void {
+        exe.addIncludePath(src() ++ "/lib/glfw/include");
+
+        try package.netcode_package.linkTo(exe);
+        package.zglfw_package.link(exe);
+        package.zgpu_package.link(exe);
+        package.zgui_package.link(exe);
+        package.zaudio_package.link(exe);
+    }
+};
 
 inline fn src() []const u8 {
     return comptime std.fs.path.dirname(@src().file) orelse ".";
