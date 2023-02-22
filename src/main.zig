@@ -325,7 +325,7 @@ fn runInternal(
     const monitors = try Monitor.getAll();
     var display_buffer: [DISPLAY_MAX]DisplayInfo = undefined;
     const display_count = @min(monitors.len, DISPLAY_MAX);
-    for (monitors[0..display_count]) |monitor, i| {
+    for (monitors, 0..display_count) |monitor, i| {
         display_buffer[i] = try getDisplayInfo(monitor.?);
     }
 
@@ -672,7 +672,7 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
             }
 
             var joysticks: [glfw.JOYSTICK_COUNT]Joystick = [_]Joystick{.{}} ** glfw.JOYSTICK_COUNT;
-            for (joysticks) |_, i| joysticks[i].init(i);
+            for (joysticks, 0..) |_, i| joysticks[i].init(i);
 
             // Swallow GLFW errors inside loop and rely on GLFW error callback for logging
             while (!self.app.should_close and !render_loop_aborted) {
@@ -680,7 +680,7 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                 const display_state_changed = displaysChanged(&displays, &self.display_buffer) catch true;
 
                 var joy_states_changed = [_]bool{false} ** glfw.JOYSTICK_COUNT;
-                for (joysticks) |_, i| joy_states_changed[i] = joysticks[i].stateChanged() catch false;
+                for (joysticks, 0..) |_, i| joy_states_changed[i] = joysticks[i].stateChanged() catch false;
 
                 var mode_change: AppContext.ModeChange = undefined;
 
@@ -692,7 +692,7 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                         table.receiveDisplayState(game, self.app, .{ .displays = displays });
                     }
 
-                    for (joy_states_changed) |changed, i| {
+                    for (joy_states_changed, 0..) |changed, i| {
                         if (changed) {
                             table.receiveJoyState(game, self.app, joysticks[i].getStateArgs());
                         }
@@ -851,7 +851,7 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
             const monitors = try Monitor.getAll();
             const new_len = @min(monitors.len, DISPLAY_MAX);
             if (old_displays.len == new_len) {
-                for (monitors[0..new_len]) |maybe_monitor, i| {
+                for (monitors, 0..new_len) |maybe_monitor, i| {
                     const monitor = maybe_monitor orelse return glfw.Error.Unknown;
                     const old_info = old_displays.*[i];
                     const new_info = try getDisplayInfo(monitor);
@@ -864,7 +864,7 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                 }
             } else {
                 state_changed = true;
-                for (monitors[0..new_len]) |maybe_monitor, i| {
+                for (monitors, 0..new_len) |maybe_monitor, i| {
                     const monitor = maybe_monitor orelse return glfw.Error.Unknown;
                     buffer[i] = try getDisplayInfo(monitor);
                 }
