@@ -14,16 +14,16 @@ pub fn build(b: *std.Build) void {
     const auxo_package = auxo.Package.build(b, target, optimize) catch unreachable;
     auxo_package.linkTo(exe) catch unreachable;
     exe.addModule("auxo", auxo_package.module);
-    exe.install();
+    b.installArtifact(exe);
 
-    const run_cmd = exe.run();
-    run_cmd.step.dependOn(b.getInstallStep());
+    const run_artifact = b.addRunArtifact(exe);
+    run_artifact.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
-        run_cmd.addArgs(args);
+        run_artifact.addArgs(args);
     }
 
     const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
+    run_step.dependOn(&run_artifact.step);
 
     const exe_tests = b.addTest(.{
         .root_source_file = .{ .path = src() ++ "src/main.zig" },

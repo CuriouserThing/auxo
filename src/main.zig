@@ -37,6 +37,7 @@ pub const JOY_HAT_MAX = io.JOY_HAT_MAX;
 
 pub const zgpu = @import("zgpu");
 pub const zgui = @import("zgui");
+pub const zmesh = @import("zmesh");
 pub const zmath = @import("zmath");
 pub const zaudio = @import("zaudio");
 
@@ -312,6 +313,12 @@ fn runInternal(
     var audio_engine_config = zaudio.Engine.Config.init();
     const audio_engine = try zaudio.Engine.create(audio_engine_config);
     defer audio_engine.destroy();
+
+    // =========================================================================
+    // ZMESH
+
+    zmesh.init(allocator);
+    defer zmesh.deinit();
 
     // =========================================================================
 
@@ -1228,7 +1235,7 @@ fn FrameTracker(comptime min_frames: u32, comptime max_frames: u32) type {
 
             const s = self.size;
             std.mem.copy(u64, self.buffer_sorted[0..s], self.buffer[0..s]);
-            std.sort.sort(u64, self.buffer_sorted[0..s], {}, comptime std.sort.asc(u64));
+            std.sort.pdq(u64, self.buffer_sorted[0..s], {}, comptime std.sort.asc(u64));
         }
 
         /// Clear all recorded frame times from the buffer, starting fresh.
