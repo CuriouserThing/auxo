@@ -11,10 +11,17 @@ pub const Point = struct {
 };
 
 pub const Size = struct {
-    w: i32,
-    h: i32,
+    w: u31,
+    h: u31,
 
     pub const zero = Size{ .w = 0, .h = 0 };
+
+    pub fn abs(w: i32, h: i32) Size {
+        return .{
+            .w = std.math.lossyCast(u31, std.math.absCast(w)),
+            .h = std.math.lossyCast(u31, std.math.absCast(h)),
+        };
+    }
 };
 
 pub const Rectangle = struct {
@@ -184,19 +191,19 @@ pub const GamepadMapping = struct {
     hat_cardinals: [HAT_COUNT][4]?JoyInput = [_][4]?JoyInput{[_]?JoyInput{null} ** 4} ** HAT_COUNT,
 
     pub fn setButton(self: *Self, button: GamepadButton, input: ?JoyInput) void {
-        self.buttons[@enumToInt(button)] = input;
+        self.buttons[@intFromEnum(button)] = input;
     }
 
     pub fn setTrigger(self: *Self, trigger: GamepadTrigger, input: ?JoyInput) void {
-        self.triggers[@enumToInt(trigger)] = input;
+        self.triggers[@intFromEnum(trigger)] = input;
     }
 
     pub fn setStickCardinal(self: *Self, stick: GamepadStick, cardinal: Cardinal, input: ?JoyInput) void {
-        self.stick_cardinals[@enumToInt(stick)][@enumToInt(cardinal)] = input;
+        self.stick_cardinals[@intFromEnum(stick)][@intFromEnum(cardinal)] = input;
     }
 
     pub fn setHatCardinal(self: *Self, hat: GamepadHat, cardinal: Cardinal, input: ?JoyInput) void {
-        self.hat_cardinals[@enumToInt(hat)][@enumToInt(cardinal)] = input;
+        self.hat_cardinals[@intFromEnum(hat)][@intFromEnum(cardinal)] = input;
     }
 
     pub const xinput: GamepadMapping = result: {
@@ -321,10 +328,10 @@ pub const JoyState = struct {
 
     /// x pointing north and y pointing east, [-1, +1]
     fn get2dInputMagnitude(self: Self, input_cardinals: [4]?JoyInput) ?[2]f32 {
-        const ni = input_cardinals[@enumToInt(Cardinal.north)] orelse return null;
-        const ei = input_cardinals[@enumToInt(Cardinal.east)] orelse return null;
-        const si = input_cardinals[@enumToInt(Cardinal.south)] orelse return null;
-        const wi = input_cardinals[@enumToInt(Cardinal.west)] orelse return null;
+        const ni = input_cardinals[@intFromEnum(Cardinal.north)] orelse return null;
+        const ei = input_cardinals[@intFromEnum(Cardinal.east)] orelse return null;
+        const si = input_cardinals[@intFromEnum(Cardinal.south)] orelse return null;
+        const wi = input_cardinals[@intFromEnum(Cardinal.west)] orelse return null;
 
         // [0, 1] cardinals
         const nm = self.getInputMagnitude(ni) orelse return null;
@@ -342,18 +349,18 @@ pub const JoyState = struct {
     // GAMEPAD GETTERS
 
     pub fn getGamepadButton(self: Self, mapping: GamepadMapping, button: GamepadButton) ?JoyButtonState {
-        const input = mapping.buttons[@enumToInt(button)] orelse return null;
+        const input = mapping.buttons[@intFromEnum(button)] orelse return null;
         const m = self.getInputMagnitude(input) orelse return null;
         return if (m > ACTUATION_THRESHOLD) .pressed else .released;
     }
 
     pub fn getGamepadTrigger(self: Self, mapping: GamepadMapping, trigger: GamepadTrigger) ?f32 {
-        const input = mapping.triggers[@enumToInt(trigger)] orelse return null;
+        const input = mapping.triggers[@intFromEnum(trigger)] orelse return null;
         return self.getInputMagnitude(input);
     }
 
     pub fn getGamepadStick(self: Self, mapping: GamepadMapping, stick: GamepadStick) ?GamepadStickState {
-        const input_cardinals = mapping.stick_cardinals[@enumToInt(stick)];
+        const input_cardinals = mapping.stick_cardinals[@intFromEnum(stick)];
         const xy = self.get2dInputMagnitude(input_cardinals) orelse return null;
         const x = xy[0];
         const y = xy[1];
@@ -364,7 +371,7 @@ pub const JoyState = struct {
     }
 
     pub fn getGamepadHat(self: Self, mapping: GamepadMapping, hat: GamepadHat) ?JoyHatDirection {
-        const input_cardinals = mapping.hat_cardinals[@enumToInt(hat)];
+        const input_cardinals = mapping.hat_cardinals[@intFromEnum(hat)];
         const xy = self.get2dInputMagnitude(input_cardinals) orelse return null;
         const north = xy[0] > ACTUATION_THRESHOLD;
         const south = xy[0] < -ACTUATION_THRESHOLD;

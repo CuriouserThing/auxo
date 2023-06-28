@@ -35,18 +35,33 @@ pub const JOY_BUTTON_MAX = io.JOY_BUTTON_MAX;
 pub const JOY_AXIS_MAX = io.JOY_AXIS_MAX;
 pub const JOY_HAT_MAX = io.JOY_HAT_MAX;
 
-pub const zgpu = @import("zgpu");
-pub const zgui = @import("zgui");
-pub const zmesh = @import("zmesh");
-pub const zmath = @import("zmath");
-pub const zaudio = @import("zaudio");
-
 pub const Seconds = f64;
+
+pub const gpu = @import("wgpu");
+pub const gui = @import("zgui");
 
 const netcode = @import("netcode");
 const glfw = @import("glfw.zig");
 const Monitor = glfw.Monitor;
 const Window = glfw.Window;
+
+/// Enumeration of strongly-typed log scopes.
+pub const LogScope = enum {
+    glfw,
+    webgpu,
+
+    pub fn eql(comptime self: LogScope, comptime other: @Type(.EnumLiteral)) bool {
+        return comptime std.mem.eql(u8, @tagName(self), @tagName(other));
+    }
+};
+
+fn Logger(comptime scope: @Type(.EnumLiteral)) type {
+    const name = @tagName(scope);
+    if (!@hasField(LogScope, name)) {
+        @compileError(name ++ " is not a valid log scope.");
+    }
+    return comptime std.log.scoped(scope);
+}
 
 pub fn GameTable(comptime Game: type) type {
     return struct {
@@ -57,8 +72,9 @@ pub fn GameTable(comptime Game: type) type {
         // Methods
         step: fn (*Game, *AppContext) void,
         skipSteps: fn (*Game, *AppContext, usize) void,
-        draw: fn (*Game, *AppContext, *zgpu.GraphicsContext, FrameInfo) void,
-        onSwapchainResized: fn (*Game, *AppContext, *zgpu.GraphicsContext, Size) void,
+        draw: fn (*Game, *AppContext, FrameContext) void,
+        onDeviceRecreated: fn (*Game, *AppContext, GraphicsContext) void,
+        onSwapChainResized: fn (*Game, *AppContext, GraphicsContext) void,
         receiveCloseRequest: fn (*Game, *AppContext, CloseRequestArgs) void,
         receiveFocusState: fn (*Game, *AppContext, FocusStateArgs) void,
         receiveIconifyState: fn (*Game, *AppContext, IconifyStateArgs) void,
@@ -81,7 +97,7 @@ pub fn ClientTable(comptime Client: type, comptime Game: type) type {
 
         // Methods
         createWindow: fn (*Client, []DisplayInfo) anyerror!WindowCreationState,
-        init: fn (*Client, *AppContext, *zgpu.GraphicsContext) anyerror!*Game,
+        init: fn (*Client, *AppContext, GraphicsContext) anyerror!*Game,
         deinit: fn (*Client, *const AppContext, *Game) void,
 
         // Inner
@@ -95,12 +111,6 @@ pub fn LoopbackServerTable(comptime LoopbackServer: type) type {
         run: fn (*LoopbackServer, *LoopbackContext) void,
     };
 }
-
-pub const FrameInfo = struct {
-    texture_view: zgpu.wgpu.TextureView,
-    step_remainder: f64 = 0.0,
-    estimated_fps: ?f64 = null,
-};
 
 pub const WindowCreationState = struct {
     title: [:0]const u8,
@@ -175,6 +185,112 @@ pub const ServerDataArgs = struct {
 };
 
 // ====================================================================================================================
+// PUBLIC CONTEXT
+
+const ModeChangeKind = enum {
+    none,
+    toggle_fullscreen,
+    turn_fullscreen_on,
+    turn_fullscreen_off,
+};
+const ModeChange = union(ModeChangeKind) {
+    none: void,
+    toggle_fullscreen: FullscreenMode,
+    turn_fullscreen_on: FullscreenMode,
+    turn_fullscreen_off: void,
+};
+
+pub const AppContext = struct {
+    const Self = @This();
+
+    netcode_client: *netcode.Client,
+    loopback: ?*LoopbackContext,
+
+    // Queued state
+    should_close: bool = false,
+    queued_mode_change: ModeChange = .{ .none = {} },
+
+    pub fn connectToServer(self: *Self, connect_token: ?*[netcode.CONNECT_TOKEN_BYTES]u8) void {
+        if (connect_token) |token| {
+            self.netcode_client.connect(token);
+        } else {
+            self.netcode_client.connectLoopback(0, 1);
+            if (self.loopback) |loopback| {
+                loopback.connectClient();
+            }
+        }
+    }
+
+    pub fn disconnectFromServer(self: *Self) void {
+        if (self.netcode_client.loopback()) {
+            if (self.loopback) |loopback| {
+                loopback.disconnectClient();
+            }
+            self.netcode_client.disconnectLoopback();
+        } else {
+            self.netcode_client.disconnect();
+        }
+    }
+
+    pub fn close(self: *Self) void {
+        self.should_close = true;
+    }
+
+    pub fn toggleFullscreen(self: *Self, fullscreen_mode: FullscreenMode) void {
+        self.queued_mode_change = .{ .toggle_fullscreen = fullscreen_mode };
+    }
+
+    pub fn turnFullscreenOn(self: *Self, mode: FullscreenMode) void {
+        self.queued_mode_change = .{ .turn_fullscreen_on = mode };
+    }
+
+    pub fn turnFullscreenOff(self: *Self) void {
+        self.queued_mode_change = .{ .turn_fullscreen_off = {} };
+    }
+
+    fn dequeueModeChange(self: *Self) ModeChange {
+        const mode_change = self.queued_mode_change;
+        self.queued_mode_change = .{ .none = {} };
+        return mode_change;
+    }
+};
+
+pub const GraphicsContext = struct {
+    device: gpu.Device,
+    framebuffer_format: gpu.TextureFormat = default_swap_chain_format,
+    framebuffer_size: Size,
+};
+
+pub const FrameContext = struct {
+    device: gpu.Device,
+    framebuffer_view: gpu.TextureView,
+    framebuffer_format: gpu.TextureFormat = default_swap_chain_format,
+    framebuffer_size: Size,
+    step_remainder: f64 = 0.0,
+    estimated_fps: ?f64 = null,
+
+    pub fn newGuiFrame(ctx: FrameContext) void {
+        const size = ctx.framebuffer_size;
+        gui.backend.newFrame(size.w, size.h);
+    }
+
+    pub fn renderGui(ctx: FrameContext, encoder: gpu.CommandEncoder) void {
+        const color_attachments = [_]gpu.RenderPassColorAttachment{.{
+            .view = ctx.framebuffer_view,
+            .load_op = .load,
+            .store_op = .store,
+        }};
+        const descriptor = gpu.RenderPassDescriptor{
+            .color_attachment_count = color_attachments.len,
+            .color_attachments = &color_attachments,
+        };
+        const pass = encoder.beginRenderPass(descriptor);
+        defer pass.release();
+
+        gui.backend.draw(pass);
+        pass.end();
+    }
+};
 
 pub const Packet = struct {
     data: []u8,
@@ -248,11 +364,14 @@ pub const LoopbackContext = struct {
 
     fn sendLoopbackPacketCallback(context: ?*anyopaque, _: c_int, packet_data: [*c]u8, packet_bytes: c_int, packet_sequence: u64) callconv(.C) void {
         if (context) |ctx| {
-            const loopback = @ptrCast(*LoopbackContext, @alignCast(@alignOf(*LoopbackContext), ctx));
-            loopback.sendPacketToServer(packet_data[0..@intCast(usize, packet_bytes)], packet_sequence);
+            const loopback = @as(*align(@alignOf(*LoopbackContext)) LoopbackContext, @ptrCast(@alignCast(ctx)));
+            loopback.sendPacketToServer(packet_data[0..@as(usize, @intCast(packet_bytes))], packet_sequence);
         }
     }
 };
+
+// ====================================================================================================================
+// INTERNAL CORE
 
 pub fn runLoopback(
     comptime Client: type,
@@ -299,26 +418,21 @@ fn runInternal(
 
     var ip = [_:0]u8{ ':', ':' };
     var client_config = netcode.defaultClientConfig();
-    client_config.callback_context = loopback orelse null;
+    client_config.callback_context = loopback;
     client_config.send_loopback_packet_callback = LoopbackContext.sendLoopbackPacketCallback;
-    var netcode_client = netcode.Client.create(&ip, &client_config, 0) orelse return;
+    const netcode_client = netcode.Client.create(&ip, &client_config, 0) orelse return;
     defer netcode_client.destroy();
 
     // =========================================================================
-    // ZAUDIO
+    // DAWN
 
-    zaudio.init(allocator);
-    defer zaudio.deinit();
+    dawnProcSetProcs(dnGetProcs());
+    const native_instance = dniCreate();
+    defer dniDestroy(native_instance);
 
-    var audio_engine_config = zaudio.Engine.Config.init();
-    const audio_engine = try zaudio.Engine.create(audio_engine_config);
-    defer audio_engine.destroy();
-
-    // =========================================================================
-    // ZMESH
-
-    zmesh.init(allocator);
-    defer zmesh.deinit();
+    dniDiscoverDefaultAdapters(native_instance);
+    const instance = dniGetWgpuInstance(native_instance) orelse return error.NoWgpuInstance;
+    defer instance.release();
 
     // =========================================================================
 
@@ -351,7 +465,7 @@ fn runInternal(
             if (os != .windows or mode.is_exclusive) {
                 const vm = try mon.getVideoMode();
                 creation_mon = mon;
-                creation_size = .{ .w = vm.width, .h = vm.height };
+                creation_size = Size.abs(vm.width, vm.height);
             }
         }
     }
@@ -359,14 +473,15 @@ fn runInternal(
     var window = try Window.create(creation_size, creation_state.title, creation_mon, null);
     defer window.destroy();
 
-    var app: AppContext = .{
+    var app = App{
         .window = window,
-        .audio_engine = audio_engine,
-        .netcode_client = netcode_client,
-        .loopback = loopback,
         .restored_pos = window.getPos() catch Point.zero,
         .restored_size = creation_state.restored_size,
         .was_maximized = creation_state.maximized,
+    };
+    var app_context = AppContext{
+        .netcode_client = netcode_client,
+        .loopback = loopback,
     };
 
     if (creation_state.fullscreen_mode) |mode| {
@@ -378,121 +493,47 @@ fn runInternal(
         }
     }
 
-    // This cast should be our only point of interface with zglfw
-    var zwindow = @ptrCast(*@import("zglfw").Window, window);
-    var graphics = try zgpu.GraphicsContext.create(allocator, zwindow);
-    defer graphics.destroy(allocator);
+    const surface = try createSurface(instance, window);
+    defer surface.release();
 
-    const h = graphics.swapchain_descriptor.height;
-    const w = graphics.swapchain_descriptor.width;
-    const swapchain_size = (@intCast(u64, w) << 32) | (@intCast(u64, h));
-
-    const E = Engine(Game, client_table.game_table);
-    var engine = E{
-        .app = &app,
-        .graphics = graphics,
-        .swapchain_size = swapchain_size,
-        .framebuffer_size = swapchain_size,
-        .timer = try Timer.start(),
-        .display_buffer = display_buffer,
-        .display_count = display_count,
-    };
-    window.setUserPointer(E, &engine);
-
-    window.setPosCallback(E, E.onPos);
-    window.setSizeCallback(E, E.onSize);
-    window.setFramebufferSizeCallback(E, E.onFramebufferSize);
-    window.setCloseCallback(E, E.onClose);
-    window.setFocusCallback(E, E.onFocus);
-    window.setIconifyCallback(E, E.onIconify);
-    window.setMaximizeCallback(E, E.onMaximize);
-    window.setCursorEnterCallback(E, E.onCursorEnter);
-    window.setKeyCallback(E, E.onKey);
-    window.setCharCallback(E, E.onChar);
-    window.setMouseButtonCallback(E, E.onMouseButton);
-    window.setCursorPosCallback(E, E.onCursorPos);
-    window.setScrollCallback(E, E.onScroll);
-
-    // Manually set size here now that we've hooked the callback
-    const fb = try window.getFramebufferSize();
-    engine.framebuffer_size = (@intCast(u64, fb.w) << 32) | (@intCast(u64, fb.h));
+    var engine: Engine(Game, client_table.game_table) = undefined;
+    const gctx = try engine.init(&app, &app_context, instance, surface, display_buffer, display_count);
+    defer engine.deinit();
 
     // =========================================================================
     // ZGUI
 
     if (client_table.use_imgui) {
-        zgui.init(allocator);
-        zgui.backend.init(
-            zwindow,
-            graphics.device,
-            @enumToInt(zgpu.GraphicsContext.swapchain_format),
+        gui.init(allocator);
+        gui.backend.init(
+            window,
+            gctx.device, // TODO: handle device loss
+            @intFromEnum(gctx.framebuffer_format),
         );
     }
     defer if (client_table.use_imgui) {
-        zgui.backend.deinit();
-        zgui.deinit();
+        gui.backend.deinit();
+        gui.deinit();
     };
 
     // =========================================================================
 
-    var game = try client_table.init(client, &app, graphics);
-    defer client_table.deinit(client, &app, game);
+    var game = try client_table.init(client, &app_context, gctx);
+    defer client_table.deinit(client, &app_context, game);
 
     try engine.eventLoop(game);
 }
 
-pub const AppContext = struct {
+const App = struct {
     const Self = @This();
 
     window: *Window,
-    audio_engine: *zaudio.Engine,
-    netcode_client: *netcode.Client,
-    loopback: ?*LoopbackContext,
 
     // Cached state
     restored_pos: Point,
     restored_size: Size,
     was_maximized: bool = false,
     fake_fullscreen_on: if (os == .windows) bool else void = if (os == .windows) false else {},
-
-    // Queued state
-    should_close: bool = false,
-    queued_mode_change: ModeChange = .{ .none = {} },
-
-    pub fn connectToServer(self: *Self, connect_token: ?*[netcode.CONNECT_TOKEN_BYTES]u8) void {
-        if (connect_token) |token| {
-            self.netcode_client.connect(token);
-        } else {
-            self.netcode_client.connectLoopback(0, 1);
-            if (self.loopback) |loopback| {
-                loopback.connectClient();
-            }
-        }
-    }
-
-    pub fn disconnectFromServer(self: *Self) void {
-        if (self.netcode_client.loopback()) {
-            if (self.loopback) |loopback| {
-                loopback.disconnectClient();
-            }
-            self.netcode_client.disconnectLoopback();
-        } else {
-            self.netcode_client.disconnect();
-        }
-    }
-
-    const ModeChangeKind = enum {
-        none,
-        toggle_fullscreen,
-        turn_fullscreen_on,
-        turn_fullscreen_off,
-    };
-    const ModeChange = union(ModeChangeKind) {
-        none: void,
-        toggle_fullscreen: FullscreenMode,
-        turn_fullscreen_on: FullscreenMode,
-        turn_fullscreen_off: void,
-    };
 
     fn onPos(self: *Self, pos: Point) void {
         if (self.shouldCacheRestoredBounds()) {
@@ -528,28 +569,6 @@ pub const AppContext = struct {
         return true;
     }
 
-    pub fn close(self: *Self) void {
-        self.should_close = true;
-    }
-
-    pub fn toggleFullscreen(self: *Self, fullscreen_mode: FullscreenMode) void {
-        self.queued_mode_change = .{ .toggle_fullscreen = fullscreen_mode };
-    }
-
-    pub fn turnFullscreenOn(self: *Self, mode: FullscreenMode) void {
-        self.queued_mode_change = .{ .turn_fullscreen_on = mode };
-    }
-
-    pub fn turnFullscreenOff(self: *Self) void {
-        self.queued_mode_change = .{ .turn_fullscreen_off = {} };
-    }
-
-    fn dequeueModeChange(self: *Self) ModeChange {
-        const mode_change = self.queued_mode_change;
-        self.queued_mode_change = .{ .none = {} };
-        return mode_change;
-    }
-
     fn changeMode(self: *Self, mode_change: ModeChange) glfw.Error!void {
         switch (mode_change) {
             .none => return,
@@ -564,7 +583,7 @@ pub const AppContext = struct {
                         try self.turnCompositedToFakeFullscreen(monitor);
                     } else {
                         const vm = try monitor.getVideoMode();
-                        self.window.setFullscreen(monitor, .{ .w = vm.width, .h = vm.height }, vm.refreshRate);
+                        self.window.setFullscreen(monitor, Size.abs(vm.width, vm.height), vm.refreshRate);
                     }
                 }
             },
@@ -580,7 +599,7 @@ pub const AppContext = struct {
                         self.turnFakeFullscreenToWindowed();
                     }
                     const vm = try monitor.getVideoMode();
-                    self.window.setFullscreen(monitor, .{ .w = vm.width, .h = vm.height }, vm.refreshRate);
+                    self.window.setFullscreen(monitor, Size.abs(vm.width, vm.height), vm.refreshRate);
                 }
             },
             .turn_fullscreen_off => {
@@ -596,7 +615,7 @@ pub const AppContext = struct {
     fn turnCompositedToFakeFullscreen(self: *Self, monitor: *Monitor) !void {
         const pos = try monitor.getPos();
         const vm = try monitor.getVideoMode();
-        const size = Size{ .w = vm.width, .h = vm.height };
+        const size = Size.abs(vm.width, vm.height);
 
         // Return if we're already fake fullscreen on this monitor, so the window doesn't flicker.
         if (self.isFakeFullscreenWithBounds(pos, size)) return;
@@ -653,10 +672,14 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
     return struct {
         const Self = @This();
 
-        app: *AppContext,
-        graphics: *zgpu.GraphicsContext,
-        swapchain_size: u64,
-        framebuffer_size: u64,
+        app: *App,
+        app_context: *AppContext,
+        instance: gpu.Instance,
+        device: gpu.Device,
+        surface: gpu.Surface,
+        swap_chain: gpu.SwapChain,
+        swap_chain_wh: u64,
+        framebuffer_wh: u64,
         timer: Timer,
         world_timestamp: u64 = 0,
         game_lock: Mutex = .{},
@@ -664,8 +687,79 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
         display_count: usize = 0,
         events: RingBuffer(64, EventArgs) = .{},
 
-        const ticks_per_step = @floatToInt(usize, table.step_time * std.time.ns_per_s);
-        const max_steps_per_update = @floatToInt(usize, table.max_step_delay / table.step_time);
+        const ticks_per_step = @as(usize, @intFromFloat(table.step_time * std.time.ns_per_s));
+        const max_steps_per_update = @as(usize, @intFromFloat(table.max_step_delay / table.step_time));
+
+        fn packSize(size: Size) u64 {
+            const w = (@as(u64, @intCast(size.w)) << 32);
+            const h = (@as(u64, @intCast(size.h)));
+            return w | h;
+        }
+        fn unpackSize(wh: u64) Size {
+            return .{
+                .w = @as(u31, @intCast(wh >> 32)),
+                .h = @as(u31, @intCast(wh & std.math.maxInt(u31))),
+            };
+        }
+
+        fn init(
+            self: *Self,
+            app: *App,
+            app_context: *AppContext,
+            instance: gpu.Instance,
+            surface: gpu.Surface,
+            display_buffer: [DISPLAY_MAX]DisplayInfo,
+            display_count: usize,
+        ) !GraphicsContext {
+            const adapter = try requestAdapter(instance);
+            defer adapter.release();
+
+            const device = try requestDevice(adapter);
+            errdefer device.release();
+
+            const size = try app.window.getFramebufferSize();
+            const swap_chain = createSwapChain(device, surface, size.w, size.h);
+            errdefer swap_chain.release();
+
+            const wh = packSize(size);
+            self.* = .{
+                .app = app,
+                .app_context = app_context,
+                .instance = instance,
+                .device = device,
+                .surface = surface,
+                .swap_chain = swap_chain,
+                .swap_chain_wh = wh,
+                .framebuffer_wh = wh,
+                .timer = try Timer.start(),
+                .display_buffer = display_buffer,
+                .display_count = display_count,
+            };
+
+            const win = app.window;
+            win.setUserPointer(Self, self);
+            win.setPosCallback(Self, onPos);
+            win.setSizeCallback(Self, onSize);
+            win.setFramebufferSizeCallback(Self, onFramebufferSize);
+            win.setCloseCallback(Self, onClose);
+            win.setFocusCallback(Self, onFocus);
+            win.setIconifyCallback(Self, onIconify);
+            win.setMaximizeCallback(Self, onMaximize);
+            win.setCursorEnterCallback(Self, onCursorEnter);
+            win.setKeyCallback(Self, onKey);
+            win.setCharCallback(Self, onChar);
+            win.setMouseButtonCallback(Self, onMouseButton);
+            win.setCursorPosCallback(Self, onCursorPos);
+            win.setScrollCallback(Self, onScroll);
+
+            return .{ .device = device, .framebuffer_size = size };
+        }
+
+        fn deinit(self: *Self) void {
+            self.swap_chain.release();
+            self.device.release();
+            // Engine doesn't own instance or surface
+        }
 
         fn eventLoop(self: *Self, game: *Game) !void {
             self.timer.reset();
@@ -682,32 +776,32 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
             for (joysticks, 0..) |_, i| joysticks[i].init(i);
 
             // Swallow GLFW errors inside loop and rely on GLFW error callback for logging
-            while (!self.app.should_close and !render_loop_aborted) {
+            while (!self.app_context.should_close and !render_loop_aborted) {
                 var displays = self.display_buffer[0..self.display_count];
                 const display_state_changed = displaysChanged(&displays, &self.display_buffer) catch true;
 
                 var joy_states_changed = [_]bool{false} ** glfw.JOYSTICK_COUNT;
                 for (joysticks, 0..) |_, i| joy_states_changed[i] = joysticks[i].stateChanged() catch false;
 
-                var mode_change: AppContext.ModeChange = undefined;
+                var mode_change: ModeChange = undefined;
 
                 {
                     self.game_lock.lock();
                     defer self.game_lock.unlock();
 
                     if (display_state_changed) {
-                        table.receiveDisplayState(game, self.app, .{ .displays = displays });
+                        table.receiveDisplayState(game, self.app_context, .{ .displays = displays });
                     }
 
                     for (joy_states_changed, 0..) |changed, i| {
                         if (changed) {
-                            table.receiveJoyState(game, self.app, joysticks[i].getStateArgs());
+                            table.receiveJoyState(game, self.app_context, joysticks[i].getStateArgs());
                         }
                     }
 
                     self.update(game);
 
-                    mode_change = self.app.dequeueModeChange();
+                    mode_change = self.app_context.dequeueModeChange();
                 }
 
                 self.app.changeMode(mode_change) catch {};
@@ -723,82 +817,45 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
             var frame_tracker: FrameTracker(60, 240) = .{ .timer = timer };
 
             while (!event_loop_broken.*) {
-                const graphics = self.graphics;
-                const fb = @atomicLoad(u64, &self.framebuffer_size, .SeqCst);
-                const fb_size: Size = .{ .w = @intCast(u31, (fb >> 32) & std.math.maxInt(u31)), .h = @intCast(u31, fb & std.math.maxInt(u31)) };
-                const swapchain_resized = self.swapchain_size != fb;
-                if (swapchain_resized) {
-                    self.swapchain_size = fb;
-                    graphics.swapchain_descriptor.width = @intCast(u32, fb_size.w);
-                    graphics.swapchain_descriptor.height = @intCast(u32, fb_size.h);
-                    graphics.swapchain.release();
-                    graphics.swapchain = graphics.device.createSwapChain(graphics.surface, graphics.swapchain_descriptor);
-
+                const wh = @atomicLoad(u64, &self.framebuffer_wh, .SeqCst);
+                const size = unpackSize(wh);
+                const swap_chain_resized = self.swap_chain_wh != wh;
+                if (swap_chain_resized) {
+                    self.swap_chain_wh = wh;
+                    self.swap_chain.release();
+                    self.swap_chain = createSwapChain(self.device, self.surface, size.w, size.h);
                     frame_tracker.reset();
                 }
 
                 const estimated_fps = frame_tracker.estimateFps();
 
-                zgui.backend.newFrame(
-                    graphics.swapchain_descriptor.width,
-                    graphics.swapchain_descriptor.height,
-                );
-
-                var texture_view = graphics.swapchain.getCurrentTextureView();
-                defer texture_view.release();
+                var framebuffer_view = self.swap_chain.getCurrentTextureView();
+                defer framebuffer_view.release();
 
                 {
                     self.game_lock.lock();
                     defer self.game_lock.unlock();
 
-                    if (swapchain_resized) {
-                        table.onSwapchainResized(game, self.app, graphics, fb_size);
+                    if (swap_chain_resized) {
+                        const gctx = GraphicsContext{ .device = self.device, .framebuffer_size = size };
+                        table.onSwapChainResized(game, self.app_context, gctx);
                     }
 
                     self.update(game);
 
                     const delta_ticks = self.timer.read() - self.world_timestamp;
-                    const frame_info = FrameInfo{
-                        .texture_view = texture_view,
-                        .step_remainder = @intToFloat(f64, delta_ticks) / @intToFloat(f64, ticks_per_step),
+                    const fctx = FrameContext{
+                        .device = self.device,
+                        .framebuffer_view = framebuffer_view,
+                        .framebuffer_size = size,
+                        .step_remainder = @as(f64, @floatFromInt(delta_ticks)) / @as(f64, @floatFromInt(ticks_per_step)),
                         .estimated_fps = estimated_fps,
                     };
-                    table.draw(game, self.app, graphics, frame_info);
-                }
-
-                {
-                    const gui_commands = commands: {
-                        const encoder = graphics.device.createCommandEncoder(null);
-                        defer encoder.release();
-
-                        {
-                            const color_attachments = [_]zgpu.wgpu.RenderPassColorAttachment{.{
-                                .view = texture_view,
-                                .load_op = .load,
-                                .store_op = .store,
-                            }};
-                            const descriptor = zgpu.wgpu.RenderPassDescriptor{
-                                .color_attachment_count = color_attachments.len,
-                                .color_attachments = &color_attachments,
-                            };
-                            const pass = encoder.beginRenderPass(descriptor);
-                            defer {
-                                pass.end();
-                                pass.release();
-                            }
-
-                            zgui.backend.draw(pass);
-                        }
-
-                        break :commands encoder.finish(null);
-                    };
-                    defer gui_commands.release();
-
-                    graphics.submit(&.{gui_commands});
+                    table.draw(game, self.app_context, fctx);
                 }
 
                 glfw.postEmptyEvent();
-                graphics.swapchain.present();
+                self.swap_chain.present();
                 frame_tracker.startOrLap();
             }
         }
@@ -806,28 +863,28 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
         fn update(self: *Self, game: *Game) void {
             while (self.events.read()) |event| {
                 switch (event) {
-                    .close_request => |args| table.receiveCloseRequest(game, self.app, args),
-                    .focus_state => |args| table.receiveFocusState(game, self.app, args),
-                    .iconify_state => |args| table.receiveIconifyState(game, self.app, args),
-                    .key_action => |args| table.receiveKeyAction(game, self.app, args),
-                    .char_input => |args| table.receiveCharInput(game, self.app, args),
-                    .mouse_button_action => |args| table.receiveMouseButtonAction(game, self.app, args),
-                    .mouse_scroll => |args| table.receiveMouseScroll(game, self.app, args),
-                    .cursor_position => |args| table.receiveCursorPosition(game, self.app, args),
-                    .cursor_entry_state => |args| table.receiveCursorEntryState(game, self.app, args),
+                    .close_request => |args| table.receiveCloseRequest(game, self.app_context, args),
+                    .focus_state => |args| table.receiveFocusState(game, self.app_context, args),
+                    .iconify_state => |args| table.receiveIconifyState(game, self.app_context, args),
+                    .key_action => |args| table.receiveKeyAction(game, self.app_context, args),
+                    .char_input => |args| table.receiveCharInput(game, self.app_context, args),
+                    .mouse_button_action => |args| table.receiveMouseButtonAction(game, self.app_context, args),
+                    .mouse_scroll => |args| table.receiveMouseScroll(game, self.app_context, args),
+                    .cursor_position => |args| table.receiveCursorPosition(game, self.app_context, args),
+                    .cursor_entry_state => |args| table.receiveCursorEntryState(game, self.app_context, args),
                 }
             }
 
-            if (self.app.loopback) |loopback| {
-                loopback.processPacketsFromServer(self.app.netcode_client);
+            if (self.app_context.loopback) |loopback| {
+                loopback.processPacketsFromServer(self.app_context.netcode_client);
             }
             var packet_sequence: u64 = undefined;
-            while (self.app.netcode_client.receivePacket(&packet_sequence) catch null) |data| {
-                table.receiveServerData(game, self.app, .{
+            while (self.app_context.netcode_client.receivePacket(&packet_sequence) catch null) |data| {
+                table.receiveServerData(game, self.app_context, .{
                     .data = data,
                     .sequence = packet_sequence,
                 });
-                self.app.netcode_client.freePacket(data);
+                self.app_context.netcode_client.freePacket(data);
             }
 
             var timestamp = self.timer.read();
@@ -836,15 +893,15 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
 
             var steps = world_delta / ticks_per_step;
             if (steps > max_steps_per_update) {
-                const steps_to_skip = max_steps_per_update - steps;
-                table.skipSteps(game, self.app, steps_to_skip);
+                const steps_to_skip = steps - max_steps_per_update;
+                table.skipSteps(game, self.app_context, steps_to_skip);
                 steps -= steps_to_skip;
                 self.world_timestamp += steps_to_skip * ticks_per_step;
             }
 
             var i: usize = 0;
             while (i < steps) : (i += 1) {
-                table.step(game, self.app);
+                table.step(game, self.app_context);
                 self.world_timestamp += ticks_per_step;
             }
         }
@@ -890,10 +947,8 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
         }
 
         fn onFramebufferSize(self: *Self, size: Size) void {
-            if (size.w > 0 and size.h > 0) {
-                const s = (@intCast(u64, size.w) << 32) | (@intCast(u64, size.h));
-                @atomicStore(u64, &self.framebuffer_size, s, .SeqCst);
-            }
+            const wh = packSize(size);
+            @atomicStore(u64, &self.framebuffer_wh, wh, .SeqCst);
         }
 
         fn onClose(self: *Self) void {
@@ -983,7 +1038,7 @@ const Joystick = struct {
 
     /// In addition to GLFW-reported errors, returns glfw.Error.Unknown if we can't read a detected joystick's state.
     pub fn stateChanged(joystick: *Joystick) glfw.Error!bool {
-        const jid = @intCast(i32, joystick.id);
+        const jid = @as(i32, @intCast(joystick.id));
         if (!glfw.joystickPresent(jid)) {
             if (joystick.connected) {
                 joystick.connected = false;
@@ -1149,14 +1204,14 @@ fn onGlfwError(error_code: ?glfw.Error, description: []const u8) void {
 
 fn getDisplayInfo(monitor: *Monitor) glfw.Error!DisplayInfo {
     const vm = try monitor.getVideoMode();
-    const size = Size{ .w = vm.width, .h = vm.height };
+    const size = Size.abs(vm.width, vm.height);
     const pos = try monitor.getPos();
     const work_area = try monitor.getWorkarea();
     const scale = try monitor.getContentScale();
     return .{
         .display_area = .{ .size = size, .pos = pos },
         .work_area = work_area,
-        .refresh_rate = @intToFloat(f32, vm.refreshRate),
+        .refresh_rate = @as(f32, @floatFromInt(vm.refreshRate)),
         .scale_factor = @min(scale.xscale, scale.yscale),
     };
 }
@@ -1203,6 +1258,278 @@ fn getMonitorAtPoint(monitors: []?*Monitor, x: i32, y: i32) ?*Monitor {
     }
     return null;
 }
+
+// ====================================================================================================================
+// GRAPHICS INITIALIZATION
+
+const default_swap_chain_format = gpu.TextureFormat.bgra8_unorm;
+
+const GpuError = error{
+    NoAdapter,
+    NoDevice,
+};
+
+const DawnNativeInstance = ?*opaque {};
+const DawnProcsTable = ?*opaque {};
+extern fn dniCreate() DawnNativeInstance;
+extern fn dniDestroy(DawnNativeInstance) void;
+extern fn dniGetWgpuInstance(DawnNativeInstance) ?gpu.Instance;
+extern fn dniDiscoverDefaultAdapters(DawnNativeInstance) void;
+extern fn dnGetProcs() DawnProcsTable;
+extern fn dawnProcSetProcs(DawnProcsTable) void;
+
+fn requestAdapter(instance: gpu.Instance) GpuError!gpu.Adapter {
+    const Response = struct {
+        waiting: bool = false,
+        status: gpu.RequestAdapterStatus = .unknown,
+        adapter: gpu.Adapter = undefined,
+        message: ?[*:0]const u8 = null,
+    };
+
+    const callback = (struct {
+        fn value(
+            status: gpu.RequestAdapterStatus,
+            adapter: gpu.Adapter,
+            message: ?[*:0]const u8,
+            userdata: ?*anyopaque,
+        ) callconv(.C) void {
+            const response = @as(*align(@alignOf(*usize)) Response, @ptrCast(@alignCast(userdata)));
+            response.* = .{ .status = status, .adapter = adapter, .message = message };
+        }
+    }).value;
+
+    var response = Response{ .waiting = true };
+    instance.requestAdapter(
+        .{ .power_preference = .high_performance },
+        callback,
+        @as(*anyopaque, @ptrCast(&response)),
+    );
+
+    // TODO: proper handling of requestAdapter "promise"
+    while (response.waiting) {}
+
+    if (response.status == .success) {
+        if (response.message) |message| {
+            Logger(.webgpu).info(
+                "Adapter successfully acquired. (message: \"{s}\")",
+                .{message},
+            );
+        } else {
+            Logger(.webgpu).info(
+                "Adapter successfully acquired.",
+                .{},
+            );
+        }
+    } else {
+        if (response.message) |message| {
+            Logger(.webgpu).err(
+                "Adapter request failed. (status: {s}, message: \"{s}\")",
+                .{ @tagName(response.status), message },
+            );
+        } else {
+            Logger(.webgpu).err(
+                "Adapter request failed. (status: {s})",
+                .{@tagName(response.status)},
+            );
+        }
+        return GpuError.NoAdapter;
+    }
+    return response.adapter;
+}
+
+fn requestDevice(adapter: gpu.Adapter) GpuError!gpu.Device {
+    const dawn_skip_validation = false; // TODO: optionize skip_validation at either build or run time
+    const link = if (!dawn_skip_validation) null else result: {
+        const toggles = [_][*:0]const u8{"skip_validation"};
+        const dawn_toggles = gpu.DawnTogglesDeviceDescriptor{
+            .chain = .{ .next = null, .struct_type = .dawn_toggles_device_descriptor },
+            .force_enabled_toggles_count = toggles.len,
+            .force_enabled_toggles = &toggles,
+        };
+        break :result @as(*const gpu.ChainedStruct, @ptrCast(&dawn_toggles));
+    };
+
+    const Response = struct {
+        waiting: bool = false,
+        status: gpu.RequestDeviceStatus = .unknown,
+        device: gpu.Device = undefined,
+        message: ?[*:0]const u8 = null,
+    };
+
+    const callback = (struct {
+        fn value(
+            status: gpu.RequestDeviceStatus,
+            device: gpu.Device,
+            message: ?[*:0]const u8,
+            userdata: ?*anyopaque,
+        ) callconv(.C) void {
+            const response = @as(*align(@alignOf(*usize)) Response, @ptrCast(@alignCast(userdata)));
+            response.* = .{ .status = status, .device = device, .message = message };
+        }
+    }).value;
+
+    var response = Response{ .waiting = true };
+    adapter.requestDevice(
+        gpu.DeviceDescriptor{ .next_in_chain = link },
+        callback,
+        @as(*anyopaque, @ptrCast(&response)),
+    );
+
+    // TODO: proper handling of requestDevice "promise"
+    while (response.waiting) {}
+
+    if (response.status == .success) {
+        if (response.message) |message| {
+            Logger(.webgpu).info(
+                "Device successfully acquired. (message: \"{s}\")",
+                .{message},
+            );
+        } else {
+            Logger(.webgpu).info(
+                "Device successfully acquired.",
+                .{},
+            );
+        }
+    } else {
+        if (response.message) |message| {
+            Logger(.webgpu).err(
+                "Device request failed. (status: {s}, message: \"{s}\")",
+                .{ @tagName(response.status), message },
+            );
+        } else {
+            Logger(.webgpu).err(
+                "Device request failed. (status: {s})",
+                .{@tagName(response.status)},
+            );
+        }
+        return GpuError.NoDevice;
+    }
+
+    // TODO: kick out these device callbacks
+    response.device.setLoggingCallback(deviceLoggingCallback, null);
+    response.device.setUncapturedErrorCallback(deviceUncapturedErrorCallback, null);
+    response.device.setDeviceLostCallback(deviceLostCallback, null);
+
+    return response.device;
+}
+
+fn deviceLoggingCallback(
+    log_type: gpu.LoggingType,
+    message: ?[*:0]const u8,
+    userdata: ?*anyopaque,
+) callconv(.C) void {
+    _ = userdata;
+    _ = message;
+    _ = log_type;
+}
+
+fn deviceUncapturedErrorCallback(
+    err_type: gpu.ErrorType,
+    message: ?[*:0]const u8,
+    userdata: ?*anyopaque,
+) callconv(.C) void {
+    _ = userdata;
+    if (message) |m| {
+        Logger(.webgpu).err("Uncaptured device error ({}):\n{s})", .{ err_type, m });
+    } else {
+        Logger(.webgpu).err("Uncaptured device error ({})", .{err_type});
+    }
+
+    std.process.exit(1);
+}
+
+fn deviceLostCallback(
+    reason: gpu.DeviceLostReason,
+    message: ?[*:0]const u8,
+    userdata: ?*anyopaque,
+) callconv(.C) void {
+    _ = userdata;
+    _ = message;
+    _ = reason;
+}
+
+fn createSurface(instance: gpu.Instance, window: *glfw.Window) glfw.Error!gpu.Surface {
+    // TODO: more robust windowing system switch (and error on Wayland)
+    switch (os) {
+        .windows => {
+            var desc = gpu.SurfaceDescriptorFromWindowsHWND{
+                .chain = .{ .next = null, .struct_type = .surface_descriptor_from_windows_hwnd },
+                .hinstance = std.os.windows.kernel32.GetModuleHandleW(null).?,
+                .hwnd = try window.getWin32Window(),
+            };
+            return instance.createSurface(.{ .next_in_chain = @as(*const gpu.ChainedStruct, @ptrCast(&desc)) });
+        },
+
+        .linux => {
+            var desc = gpu.SurfaceDescriptorFromXlibWindow{
+                .chain = .{ .next = null, .struct_type = .surface_descriptor_from_xlib_window },
+                .display = try glfw.getX11Display(),
+                .window = try window.getX11Window(),
+            };
+            return instance.createSurface(.{ .next_in_chain = @as(*const gpu.ChainedStruct, @ptrCast(&desc)) });
+        },
+
+        .macos => {
+            const ns_window = try window.getCocoaWindow();
+
+            // Create Metal layer and add Retina support
+            const ns_view = objc.msgSend(ns_window, "contentView", .{}, *anyopaque);
+            objc.msgSend(ns_view, "setWantsLayer:", .{true}, void);
+            const CAMetalLayer = objc.getClass("CAMetalLayer");
+            const layer = objc.msgSend(CAMetalLayer, "layer", .{}, ?*anyopaque) orelse {
+                @panic("Couldn't create Metal layer.");
+            };
+            objc.msgSend(ns_view, "setLayer:", .{layer}, void);
+            const scale = objc.msgSend(ns_window, "backingScaleFactor", .{}, f64);
+            objc.msgSend(layer, "setContentsScale:", .{scale}, void);
+
+            var desc = gpu.SurfaceDescriptorFromMetalLayer{
+                .chain = .{ .next = null, .struct_type = .surface_descriptor_from_metal_layer },
+                .layer = layer,
+            };
+            return instance.createSurface(.{ .next_in_chain = @as(*const gpu.ChainedStruct, @ptrCast(&desc)) });
+        },
+
+        else => @compileError("Platform not supported."),
+    }
+}
+
+fn createSwapChain(device: gpu.Device, surface: gpu.Surface, width: u32, height: u32) gpu.SwapChain {
+    const desc = gpu.SwapChainDescriptor{
+        .usage = .{ .render_attachment = true },
+        .format = default_swap_chain_format,
+        .width = width,
+        .height = height,
+        .present_mode = .fifo,
+        .implementation = 0,
+    };
+    return device.createSwapChain(surface, desc);
+}
+
+const objc = struct {
+    const SEL = ?*opaque {};
+    const Class = ?*opaque {};
+
+    extern fn sel_getUid(str: [*:0]const u8) SEL;
+    extern fn objc_getClass(name: [*:0]const u8) Class;
+    extern fn objc_msgSend() void;
+
+    fn getClass(name: [*:0]const u8) Class {
+        return objc_getClass(name);
+    }
+
+    fn msgSend(obj: anytype, sel_name: [:0]const u8, args: anytype, comptime ReturnType: type) ReturnType {
+        const args_meta = @typeInfo(@TypeOf(args)).Struct.fields;
+        const FnType = switch (args_meta.len) {
+            0 => *const fn (@TypeOf(obj), SEL) callconv(.C) ReturnType,
+            1 => *const fn (@TypeOf(obj), SEL, args_meta[0].type) callconv(.C) ReturnType,
+            else => @compileError("Too many params for objc msgSend (manually add support for more)."),
+        };
+        const func = @as(FnType, @ptrCast(&objc_msgSend));
+        const sel = sel_getUid(sel_name.ptr);
+        return @call(.never_inline, func, .{ obj, sel } ++ args);
+    }
+};
 
 // ====================================================================================================================
 
@@ -1258,8 +1585,8 @@ fn FrameTracker(comptime min_frames: u32, comptime max_frames: u32) type {
                 median = (median + medianA) / 2;
             }
 
-            const ticks_per_frame = @intToFloat(f64, median);
-            const ticks_per_second = comptime @intToFloat(f64, std.time.ns_per_s);
+            const ticks_per_frame = @as(f64, @floatFromInt(median));
+            const ticks_per_second = comptime @as(f64, @floatFromInt(std.time.ns_per_s));
             return ticks_per_second / ticks_per_frame;
         }
     };

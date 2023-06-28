@@ -79,8 +79,13 @@ pub const terminate = c.glfwTerminate;
 pub const waitEvents = c.glfwWaitEvents;
 pub const postEmptyEvent = c.glfwPostEmptyEvent;
 
+extern fn glfwGetX11Display() ?*anyopaque;
+pub fn getX11Display() !*anyopaque {
+    return glfwGetX11Display() orelse (getError() orelse Error.Unknown);
+}
+
 pub fn hintWindowMaximized(value: bool) void {
-    c.glfwWindowHint(c.GLFW_MAXIMIZED, @boolToInt(value));
+    c.glfwWindowHint(c.GLFW_MAXIMIZED, @intFromBool(value));
 }
 
 pub const JOYSTICK_COUNT = c.GLFW_JOYSTICK_LAST + 1;
@@ -98,13 +103,13 @@ extern fn glfwGetJoystickButtons(jid: c_int, count: [*c]c_int) [*c]const JoyButt
 pub fn getJoystickButtons(jid: i32) !?[]const JoyButtonState {
     var count: i32 = 0;
     const ptr = glfwGetJoystickButtons(jid, &count) orelse return getError() orelse null;
-    return ptr[0..@intCast(usize, count)];
+    return ptr[0..@as(usize, @intCast(count))];
 }
 
 pub fn getJoystickAxes(jid: i32) !?[]const f32 {
     var count: i32 = 0;
     const ptr = c.glfwGetJoystickAxes(jid, &count) orelse return getError() orelse null;
-    return ptr[0..@intCast(usize, count)];
+    return ptr[0..@as(usize, @intCast(count))];
 }
 
 pub const JoyHatState = enum(u8) {
@@ -123,7 +128,7 @@ extern fn glfwGetJoystickHats(jid: c_int, count: [*c]c_int) [*c]const JoyHatStat
 pub fn getJoystickHats(jid: i32) !?[]const JoyHatState {
     var count: i32 = 0;
     const ptr = glfwGetJoystickHats(jid, &count) orelse return getError() orelse null;
-    return ptr[0..@intCast(usize, count)];
+    return ptr[0..@as(usize, @intCast(count))];
 }
 
 pub fn getJoystickGuid(jid: i32) !?[]const u8 {
@@ -150,7 +155,7 @@ pub const Monitor = opaque {
     pub fn getAll() ![]?*Self {
         var count: i32 = 0;
         const handles = c.glfwGetMonitors(&count) orelse return getError() orelse return Error.Unknown;
-        return @ptrCast([*]?*Self, handles)[0..@intCast(usize, count)];
+        return @as([*]?*Self, @ptrCast(handles))[0..@as(usize, @intCast(count))];
     }
 
     pub fn setUserPointer(self: *Self, comptime T: type, pointer: ?*T) void {
@@ -159,7 +164,7 @@ pub const Monitor = opaque {
 
     pub fn getUserPointer(self: *Self, comptime T: type) ?*T {
         const user_ptr = glfwGetMonitorUserPointer(self) orelse return null;
-        return @ptrCast(*T, @alignCast(@sizeOf(*T), user_ptr));
+        return @as(*align(@sizeOf(*T)) T, @ptrCast(@alignCast(user_ptr)));
     }
 
     pub fn getName(self: *Self) ?[]const u8 {
@@ -179,7 +184,10 @@ pub const Monitor = opaque {
         var width: i32 = 0;
         var height: i32 = 0;
         glfwGetMonitorWorkarea(self, &xpos, &ypos, &width, &height);
-        return getError() orelse .{ .pos = .{ .x = xpos, .y = ypos }, .size = .{ .w = width, .h = height } };
+        return getError() orelse .{
+            .pos = .{ .x = xpos, .y = ypos },
+            .size = Size.abs(width, height),
+        };
     }
 
     pub const Scale = struct {
@@ -227,16 +235,6 @@ pub const Window = opaque {
         glfwDestroyWindow(self);
     }
 
-    pub fn setUserPointer(self: *Self, comptime T: type, pointer: ?*T) void {
-        glfwSetWindowUserPointer(self, pointer);
-    }
-
-    fn getUserObj(window: ?*Self, comptime T: type) ?*T {
-        const w = window orelse return null;
-        const user_ptr = glfwGetWindowUserPointer(w) orelse return null;
-        return @ptrCast(*T, @alignCast(@sizeOf(*T), user_ptr));
-    }
-
     pub fn hide(self: *Self) void {
         glfwHideWindow(self);
     }
@@ -268,7 +266,7 @@ pub const Window = opaque {
         var width: i32 = 0;
         var height: i32 = 0;
         glfwGetWindowSize(self, &width, &height);
-        return getError() orelse .{ .w = width, .h = height };
+        return getError() orelse Size.abs(width, height);
     }
 
     pub fn setSize(self: *Self, size: Size) void {
@@ -276,7 +274,7 @@ pub const Window = opaque {
     }
 
     pub fn setDecorated(self: *Self, decorated: bool) void {
-        glfwSetWindowAttrib(self, c.GLFW_DECORATED, @boolToInt(decorated));
+        glfwSetWindowAttrib(self, c.GLFW_DECORATED, @intFromBool(decorated));
     }
 
     pub fn isMaximized(self: *Self) bool {
@@ -299,11 +297,43 @@ pub const Window = opaque {
         var width: i32 = 0;
         var height: i32 = 0;
         glfwGetFramebufferSize(self, &width, &height);
-        return getError() orelse .{ .w = width, .h = height };
+        return getError() orelse Size.abs(width, height);
     }
 
     pub fn getFullscreenMonitor(self: *Self) ?*Monitor {
         return glfwGetWindowMonitor(self);
+    }
+
+    // ================================================================================================================
+    // NATIVE
+
+    extern fn glfwGetWin32Window(*Self) ?*anyopaque;
+    extern fn glfwGetCocoaWindow(*Self) ?*anyopaque;
+    extern fn glfwGetX11Window(*Self) ?*anyopaque;
+
+    pub fn getWin32Window(self: *Self) !*anyopaque {
+        return glfwGetWin32Window(self) orelse (getError() orelse Error.Unknown);
+    }
+
+    pub fn getCocoaWindow(self: *Self) !*anyopaque {
+        return glfwGetCocoaWindow(self) orelse (getError() orelse Error.Unknown);
+    }
+
+    pub fn getX11Window(self: *Self) !*anyopaque {
+        return glfwGetX11Window(self) orelse (getError() orelse Error.Unknown);
+    }
+
+    // ================================================================================================================
+    // CALLBACKS
+
+    pub fn setUserPointer(self: *Self, comptime T: type, pointer: ?*T) void {
+        glfwSetWindowUserPointer(self, pointer);
+    }
+
+    fn getUserObj(window: ?*Self, comptime T: type) ?*T {
+        const w = window orelse return null;
+        const user_ptr = glfwGetWindowUserPointer(w) orelse return null;
+        return @as(*align(@sizeOf(*T)) T, @ptrCast(@alignCast(user_ptr)));
     }
 
     const GLFWwindowposfun = fn (?*Self, c_int, c_int) callconv(.C) void;
@@ -387,7 +417,7 @@ pub const Window = opaque {
         return struct {
             fn value(window: ?*Self, width: c_int, height: c_int) callconv(.C) void {
                 const obj = getUserObj(window, T) orelse return;
-                callback(obj, .{ .w = width, .h = height });
+                callback(obj, Size.abs(width, height));
             }
         };
     }
@@ -435,7 +465,7 @@ pub const Window = opaque {
             fn value(window: ?*Self, codepoint: c_uint) callconv(.C) void {
                 const obj = getUserObj(window, T) orelse return;
                 if (codepoint > 0x1FFFFF) return;
-                var cp = @intCast(u21, codepoint);
+                var cp = @as(u21, @intCast(codepoint));
                 if (!std.unicode.utf8ValidCodepoint(cp)) return;
                 callback(obj, cp);
             }
