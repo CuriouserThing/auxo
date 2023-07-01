@@ -39,16 +39,21 @@ pub const Seconds = f64;
 
 pub const gpu = @import("wgpu");
 pub const gui = @import("zgui");
+const imgui = @import("imgui.zig");
 
 const netcode = @import("netcode");
 const glfw = @import("glfw.zig");
 const Monitor = glfw.Monitor;
 const Window = glfw.Window;
 
+// TODO: make this a proper build option
+const use_imgui = true;
+
 /// Enumeration of strongly-typed log scopes.
 pub const LogScope = enum {
     glfw,
     webgpu,
+    imgui,
 
     pub fn eql(comptime self: LogScope, comptime other: @Type(.EnumLiteral)) bool {
         return comptime std.mem.eql(u8, @tagName(self), @tagName(other));
@@ -63,6 +68,13 @@ fn Logger(comptime scope: @Type(.EnumLiteral)) type {
     return comptime std.log.scoped(scope);
 }
 
+const Error = error{
+    NoWebGpuInstance,
+    NoWebGpuAdapter,
+    NoWebGpuDevice,
+    ImGuiInitFailure,
+};
+
 pub fn GameTable(comptime Game: type) type {
     return struct {
         // Config
@@ -72,9 +84,12 @@ pub fn GameTable(comptime Game: type) type {
         // Methods
         step: fn (*Game, *AppContext) void,
         skipSteps: fn (*Game, *AppContext, usize) void,
-        draw: fn (*Game, *AppContext, FrameContext) void,
-        onDeviceRecreated: fn (*Game, *AppContext, GraphicsContext) void,
-        onSwapChainResized: fn (*Game, *AppContext, GraphicsContext) void,
+        draw: fn (*Game, *AppContext, *DrawContext) void,
+        onWindowOpening: fn (*Game, *AppContext, *WindowOpeningContext) void,
+        onGpuDeviceCreated: fn (*Game, *AppContext, *GpuDeviceCreatedContext) void,
+        onGpuDeviceLost: fn (*Game, *AppContext, *GpuDeviceLostContext) void,
+        onSwapChainCreated: fn (*Game, *AppContext, *SwapChainCreatedContext) void,
+        onSwapChainDestroyed: fn (*Game, *AppContext, *SwapChainDestroyedContext) void,
         receiveCloseRequest: fn (*Game, *AppContext, CloseRequestArgs) void,
         receiveFocusState: fn (*Game, *AppContext, FocusStateArgs) void,
         receiveIconifyState: fn (*Game, *AppContext, IconifyStateArgs) void,
@@ -90,21 +105,6 @@ pub fn GameTable(comptime Game: type) type {
     };
 }
 
-pub fn ClientTable(comptime Client: type, comptime Game: type) type {
-    return struct {
-        // Config
-        use_imgui: bool = false,
-
-        // Methods
-        createWindow: fn (*Client, []DisplayInfo) anyerror!WindowCreationState,
-        init: fn (*Client, *AppContext, GraphicsContext) anyerror!*Game,
-        deinit: fn (*Client, *const AppContext, *Game) void,
-
-        // Inner
-        game_table: GameTable(Game),
-    };
-}
-
 pub fn LoopbackServerTable(comptime LoopbackServer: type) type {
     return struct {
         // Methods
@@ -112,20 +112,32 @@ pub fn LoopbackServerTable(comptime LoopbackServer: type) type {
     };
 }
 
-pub const WindowCreationState = struct {
-    title: [:0]const u8,
-    restored_size: Size,
-    maximized: bool = false,
-    fullscreen_mode: ?FullscreenMode = null,
-};
-
-pub const FullscreenMode = struct {
-    monitor_location: ?Point = null,
-    is_exclusive: bool = false,
-};
-
 // ====================================================================================================================
 // EVENTS
+
+pub const WindowOpeningContext = struct {
+    displays: []const DisplayInfo,
+    title: [:0]const u8,
+    restored_size: Size,
+    maximized: bool,
+};
+
+pub const GpuDeviceCreatedContext = struct {
+    device: gpu.Device,
+    framebuffer_format: gpu.TextureFormat = default_swap_chain_format,
+};
+
+pub const GpuDeviceLostContext = struct {};
+
+pub const SwapChainCreatedContext = struct {
+    device: gpu.Device,
+    framebuffer_format: gpu.TextureFormat = default_swap_chain_format,
+    framebuffer_size: Size,
+};
+
+pub const SwapChainDestroyedContext = struct {
+    device: gpu.Device,
+};
 
 pub const CloseRequestArgs = void;
 
@@ -187,6 +199,10 @@ pub const ServerDataArgs = struct {
 // ====================================================================================================================
 // PUBLIC CONTEXT
 
+pub const FullscreenMode = struct {
+    monitor_location: ?Point = null,
+    is_exclusive: bool = false,
+};
 const ModeChangeKind = enum {
     none,
     toggle_fullscreen,
@@ -255,13 +271,7 @@ pub const AppContext = struct {
     }
 };
 
-pub const GraphicsContext = struct {
-    device: gpu.Device,
-    framebuffer_format: gpu.TextureFormat = default_swap_chain_format,
-    framebuffer_size: Size,
-};
-
-pub const FrameContext = struct {
+pub const DrawContext = struct {
     device: gpu.Device,
     framebuffer_view: gpu.TextureView,
     framebuffer_format: gpu.TextureFormat = default_swap_chain_format,
@@ -269,12 +279,20 @@ pub const FrameContext = struct {
     step_remainder: f64 = 0.0,
     estimated_fps: ?f64 = null,
 
-    pub fn newGuiFrame(ctx: FrameContext) void {
+    pub fn newGuiFrame(ctx: DrawContext) void {
+        if (!use_imgui) return;
+
         const size = ctx.framebuffer_size;
-        gui.backend.newFrame(size.w, size.h);
+        imgui.wgpu.newFrame();
+        imgui.glfw.newFrame();
+        gui.io.setDisplaySize(@floatFromInt(size.w), @floatFromInt(size.h));
+        gui.io.setDisplayFramebufferScale(1.0, 1.0);
+        gui.newFrame();
     }
 
-    pub fn renderGui(ctx: FrameContext, encoder: gpu.CommandEncoder) void {
+    pub fn renderGui(ctx: DrawContext, encoder: gpu.CommandEncoder) void {
+        if (!use_imgui) return;
+
         const color_attachments = [_]gpu.RenderPassColorAttachment{.{
             .view = ctx.framebuffer_view,
             .load_op = .load,
@@ -287,7 +305,8 @@ pub const FrameContext = struct {
         const pass = encoder.beginRenderPass(descriptor);
         defer pass.release();
 
-        gui.backend.draw(pass);
+        gui.render();
+        imgui.wgpu.renderDrawData(gui.getDrawData(), pass);
         pass.end();
     }
 };
@@ -364,8 +383,8 @@ pub const LoopbackContext = struct {
 
     fn sendLoopbackPacketCallback(context: ?*anyopaque, _: c_int, packet_data: [*c]u8, packet_bytes: c_int, packet_sequence: u64) callconv(.C) void {
         if (context) |ctx| {
-            const loopback = @as(*align(@alignOf(*LoopbackContext)) LoopbackContext, @ptrCast(@alignCast(ctx)));
-            loopback.sendPacketToServer(packet_data[0..@as(usize, @intCast(packet_bytes))], packet_sequence);
+            const loopback: *LoopbackContext = @ptrCast(@alignCast(ctx));
+            loopback.sendPacketToServer(packet_data[0..@intCast(packet_bytes)], packet_sequence);
         }
     }
 };
@@ -374,10 +393,9 @@ pub const LoopbackContext = struct {
 // INTERNAL CORE
 
 pub fn runLoopback(
-    comptime Client: type,
     comptime Game: type,
-    comptime client_table: ClientTable(Client, Game),
-    client: *Client,
+    comptime game_table: GameTable(Game),
+    game: *Game,
     comptime LoopbackServer: type,
     comptime loopback_server_table: LoopbackServerTable(LoopbackServer),
     loopback_server: *LoopbackServer,
@@ -387,32 +405,28 @@ pub fn runLoopback(
     const server_thread = try std.Thread.spawn(.{}, loopback_server_table.run, .{ loopback_server, &loopback });
     defer server_thread.join();
 
-    try runInternal(Client, Game, client_table, client, allocator, &loopback);
+    try runInternal(Game, game_table, game, allocator, &loopback);
 
     loopback.client_active = false;
 }
 
 pub fn run(
-    comptime Client: type,
     comptime Game: type,
-    comptime client_table: ClientTable(Client, Game),
-    client: *Client,
+    comptime game_table: GameTable(Game),
+    game: *Game,
     allocator: Allocator,
 ) !void {
-    try runInternal(Client, Game, client_table, client, allocator, null);
+    try runInternal(Game, game_table, game, allocator, null);
 }
 
 fn runInternal(
-    comptime Client: type,
     comptime Game: type,
-    comptime client_table: ClientTable(Client, Game),
-    client: *Client,
+    comptime game_table: GameTable(Game),
+    game: *Game,
     allocator: Allocator,
     loopback: ?*LoopbackContext,
 ) !void {
     // =========================================================================
-    // NETCODE
-
     try netcode.init();
     defer netcode.term();
 
@@ -424,17 +438,14 @@ fn runInternal(
     defer netcode_client.destroy();
 
     // =========================================================================
-    // DAWN
 
-    dawnProcSetProcs(dnGetProcs());
-    const native_instance = dniCreate();
-    defer dniDestroy(native_instance);
+    var app_context = AppContext{
+        .netcode_client = netcode_client,
+        .loopback = loopback,
+    };
 
-    dniDiscoverDefaultAdapters(native_instance);
-    const instance = dniGetWgpuInstance(native_instance) orelse return error.NoWgpuInstance;
-    defer instance.release();
-
-    // =========================================================================
+    if (use_imgui) gui.init(allocator);
+    defer if (use_imgui) gui.deinit();
 
     logGlfwVersion();
     glfw.setErrorCallback(onGlfwError);
@@ -450,78 +461,74 @@ fn runInternal(
         display_buffer[i] = try getDisplayInfo(monitor.?);
     }
 
-    const creation_state = try client_table.createWindow(client, display_buffer[0..display_count]);
-    glfw.hintWindowMaximized(creation_state.maximized);
-    var maybe_mon: ?*Monitor = null;
+    var window_opening = WindowOpeningContext{
+        .displays = display_buffer[0..display_count],
+        .title = "auxo game",
+        .restored_size = .{ .w = 640, .h = 360 },
+        .maximized = false,
+    };
+    game_table.onWindowOpening(game, &app_context, &window_opening);
 
-    // Determine the size and optional monitor to pass to glfwCreateWindow
-    var creation_mon: ?*Monitor = null;
-    var creation_size = creation_state.restored_size;
-    if (creation_state.fullscreen_mode) |mode| {
-        const loc = mode.monitor_location orelse Point.zero;
-        maybe_mon = getMonitorAtPoint(monitors, loc.x, loc.y);
-        if (maybe_mon) |mon| {
-            // Handle real fullscreen via glfwCreateWindow
-            if (os != .windows or mode.is_exclusive) {
-                const vm = try mon.getVideoMode();
-                creation_mon = mon;
-                creation_size = Size.abs(vm.width, vm.height);
-            }
-        }
-    }
-
-    var window = try Window.create(creation_size, creation_state.title, creation_mon, null);
+    glfw.hintWindowMaximized(window_opening.maximized);
+    glfw.hintWindowVisible(false);
+    var window = try Window.create(window_opening.restored_size, window_opening.title, null, null);
     defer window.destroy();
 
     var app = App{
         .window = window,
         .restored_pos = window.getPos() catch Point.zero,
-        .restored_size = creation_state.restored_size,
-        .was_maximized = creation_state.maximized,
+        .restored_size = window_opening.restored_size,
+        .was_maximized = window_opening.maximized,
     };
-    var app_context = AppContext{
-        .netcode_client = netcode_client,
-        .loopback = loopback,
+    const mode_change = app_context.dequeueModeChange();
+    try app.changeMode(mode_change);
+
+    var engine: Engine(Game, game_table) = .{
+        .app = &app,
+        .app_context = &app_context,
+        .world_timer = try Timer.start(),
     };
 
-    if (creation_state.fullscreen_mode) |mode| {
-        if (maybe_mon) |mon| {
-            // Handle fake fullscreen manually
-            if (os == .windows and !mode.is_exclusive) {
-                try app.turnCompositedToFakeFullscreen(mon);
-            }
+    // Hook Auxo callbacks first...
+    try engine.hookWindow(window);
+
+    // ...then ImGui callbacks
+    if (use_imgui) {
+        if (imgui.glfw.initForOther(window, true)) {
+            Logger(.imgui).info("ImGui GLFW backend Initialization successful.", .{});
+        } else {
+            Logger(.imgui).err("ImGui GLFW backend Initialization failed.", .{});
+            return Error.ImGuiInitFailure;
         }
     }
+    defer if (use_imgui) imgui.glfw.shutdown();
+
+    window.show();
+
+    // =========================================================================
+
+    dawnProcSetProcs(dnGetProcs());
+    const native_instance = dniCreate();
+    defer dniDestroy(native_instance);
+
+    dniDiscoverDefaultAdapters(native_instance);
+    const instance = dniGetWgpuInstance(native_instance) orelse return Error.NoWebGpuInstance;
+    defer instance.release();
 
     const surface = try createSurface(instance, window);
     defer surface.release();
 
-    var engine: Engine(Game, client_table.game_table) = undefined;
-    const gctx = try engine.init(&app, &app_context, instance, surface, display_buffer, display_count);
-    defer engine.deinit();
-
     // =========================================================================
-    // ZGUI
 
-    if (client_table.use_imgui) {
-        gui.init(allocator);
-        gui.backend.init(
-            window,
-            gctx.device, // TODO: handle device loss
-            @intFromEnum(gctx.framebuffer_format),
-        );
-    }
-    defer if (client_table.use_imgui) {
-        gui.backend.deinit();
-        gui.deinit();
+    var event_loop_state = .{
+        .display_buffer = display_buffer,
+        .display_count = display_count,
     };
-
-    // =========================================================================
-
-    var game = try client_table.init(client, &app_context, gctx);
-    defer client_table.deinit(client, &app_context, game);
-
-    try engine.eventLoop(game);
+    var render_loop_state = .{
+        .instance = instance,
+        .surface = surface,
+    };
+    try engine.eventLoop(game, &event_loop_state, &render_loop_state);
 }
 
 const App = struct {
@@ -532,7 +539,7 @@ const App = struct {
     // Cached state
     restored_pos: Point,
     restored_size: Size,
-    was_maximized: bool = false,
+    was_maximized: bool,
     fake_fullscreen_on: if (os == .windows) bool else void = if (os == .windows) false else {},
 
     fn onPos(self: *Self, pos: Point) void {
@@ -624,9 +631,7 @@ const App = struct {
         // 1. Win32 can't properly mutate a maximized window (this could later lead to a maximized window that doesn't cover the screen).
         // 2. We can't re-dock a "pane" (an unrestored, unmaximized window docked on the side of a monitor), so we don't want to cache its docked pos or size.
         // To properly deal with the first case, we have to manually cache the window's maximized state.
-        const wm = self.was_maximized;
-        self.window.restore();
-        self.was_maximized = wm;
+        self.restore();
 
         self.fake_fullscreen_on = true;
         self.window.hide();
@@ -644,14 +649,14 @@ const App = struct {
         self.window.show();
         self.fake_fullscreen_on = false;
 
-        self.window.restore();
+        self.restore();
         if (self.was_maximized) self.window.maximize();
     }
 
     fn turnRealFullscreenToWindowed(self: *Self) void {
         self.window.setWindowed(self.restored_pos, self.restored_size);
 
-        self.window.restore();
+        self.restore();
         if (self.was_maximized) self.window.maximize();
     }
 
@@ -666,6 +671,22 @@ const App = struct {
 
         return true;
     }
+
+    fn restore(self: *Self) void {
+        const wm = self.was_maximized;
+        self.window.restore();
+        self.was_maximized = wm;
+    }
+};
+
+const EventLoopState = struct {
+    display_buffer: [DISPLAY_MAX]DisplayInfo,
+    display_count: usize = 0,
+};
+
+const RenderLoopState = struct {
+    instance: gpu.Instance,
+    surface: gpu.Surface,
 };
 
 fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
@@ -674,69 +695,28 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
 
         app: *App,
         app_context: *AppContext,
-        instance: gpu.Instance,
-        device: gpu.Device,
-        surface: gpu.Surface,
-        swap_chain: gpu.SwapChain,
-        swap_chain_wh: u64,
-        framebuffer_wh: u64,
-        timer: Timer,
+        framebuffer_wh: u64 = 0,
+        world_timer: Timer,
         world_timestamp: u64 = 0,
         game_lock: Mutex = .{},
-        display_buffer: [DISPLAY_MAX]DisplayInfo,
-        display_count: usize = 0,
         events: RingBuffer(64, EventArgs) = .{},
 
-        const ticks_per_step = @as(usize, @intFromFloat(table.step_time * std.time.ns_per_s));
-        const max_steps_per_update = @as(usize, @intFromFloat(table.max_step_delay / table.step_time));
+        const ticks_per_step: usize = @intFromFloat(table.step_time * std.time.ns_per_s);
+        const max_steps_per_update: usize = @intFromFloat(table.max_step_delay / table.step_time);
 
         fn packSize(size: Size) u64 {
-            const w = (@as(u64, @intCast(size.w)) << 32);
-            const h = (@as(u64, @intCast(size.h)));
+            const w = @as(u64, @intCast(size.w)) << 32;
+            const h = size.h;
             return w | h;
         }
         fn unpackSize(wh: u64) Size {
             return .{
-                .w = @as(u31, @intCast(wh >> 32)),
-                .h = @as(u31, @intCast(wh & std.math.maxInt(u31))),
+                .w = @intCast(wh >> 32),
+                .h = @intCast(wh & std.math.maxInt(u31)),
             };
         }
 
-        fn init(
-            self: *Self,
-            app: *App,
-            app_context: *AppContext,
-            instance: gpu.Instance,
-            surface: gpu.Surface,
-            display_buffer: [DISPLAY_MAX]DisplayInfo,
-            display_count: usize,
-        ) !GraphicsContext {
-            const adapter = try requestAdapter(instance);
-            defer adapter.release();
-
-            const device = try requestDevice(adapter);
-            errdefer device.release();
-
-            const size = try app.window.getFramebufferSize();
-            const swap_chain = createSwapChain(device, surface, size.w, size.h);
-            errdefer swap_chain.release();
-
-            const wh = packSize(size);
-            self.* = .{
-                .app = app,
-                .app_context = app_context,
-                .instance = instance,
-                .device = device,
-                .surface = surface,
-                .swap_chain = swap_chain,
-                .swap_chain_wh = wh,
-                .framebuffer_wh = wh,
-                .timer = try Timer.start(),
-                .display_buffer = display_buffer,
-                .display_count = display_count,
-            };
-
-            const win = app.window;
+        fn hookWindow(self: *Self, win: *Window) !void {
             win.setUserPointer(Self, self);
             win.setPosCallback(Self, onPos);
             win.setSizeCallback(Self, onSize);
@@ -752,21 +732,23 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
             win.setCursorPosCallback(Self, onCursorPos);
             win.setScrollCallback(Self, onScroll);
 
-            return .{ .device = device, .framebuffer_size = size };
+            // Now that we've hooked the framebuffer callback, we can init this cleanly
+            const size = try win.getFramebufferSize();
+            self.framebuffer_wh = packSize(size);
         }
 
-        fn deinit(self: *Self) void {
-            self.swap_chain.release();
-            self.device.release();
-            // Engine doesn't own instance or surface
-        }
-
-        fn eventLoop(self: *Self, game: *Game) !void {
-            self.timer.reset();
+        fn eventLoop(self: *Self, game: *Game, state: *EventLoopState, render_loop_state: *RenderLoopState) !void {
+            self.world_timer.reset();
 
             var event_loop_broken = false;
             var render_loop_aborted = false;
-            const render_thread = try std.Thread.spawn(.{}, renderLoop, .{ self, game, &event_loop_broken, &render_loop_aborted });
+            const render_thread = try std.Thread.spawn(.{}, renderLoop, .{
+                self,
+                game,
+                render_loop_state,
+                &event_loop_broken,
+                &render_loop_aborted,
+            });
             defer {
                 event_loop_broken = true;
                 render_thread.join();
@@ -777,8 +759,8 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
 
             // Swallow GLFW errors inside loop and rely on GLFW error callback for logging
             while (!self.app_context.should_close and !render_loop_aborted) {
-                var displays = self.display_buffer[0..self.display_count];
-                const display_state_changed = displaysChanged(&displays, &self.display_buffer) catch true;
+                var displays = state.display_buffer[0..state.display_count];
+                const display_state_changed = displaysChanged(&displays, &state.display_buffer) catch true;
 
                 var joy_states_changed = [_]bool{false} ** glfw.JOYSTICK_COUNT;
                 for (joysticks, 0..) |_, i| joy_states_changed[i] = joysticks[i].stateChanged() catch false;
@@ -805,57 +787,120 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                 }
 
                 self.app.changeMode(mode_change) catch {};
-                glfw.waitEvents();
+                glfw.waitEventsTimeout(0.5);
             }
         }
 
-        fn renderLoop(self: *Self, game: *Game, event_loop_broken: *const bool, render_loop_aborted: *bool) !void {
-            var timer = Timer.start() catch |err| {
+        fn renderLoop(self: *Self, game: *Game, state: *RenderLoopState, event_loop_broken: *const bool, render_loop_aborted: *bool) !void {
+            self.renderLoopInner(game, state, event_loop_broken) catch |err| {
                 render_loop_aborted.* = true;
                 return err;
             };
-            var frame_tracker: FrameTracker(60, 240) = .{ .timer = timer };
+        }
+
+        fn renderLoopInner(self: *Self, game: *Game, state: *RenderLoopState, event_loop_broken: *const bool) !void {
+            var frame_tracker: FrameTracker(60, 240) = .{ .timer = try Timer.start() };
+
+            var device_lost = false;
+            var device = try requestDevice(state.instance, &device_lost);
+            var device_created = true;
+            defer releaseDevice(device);
+
+            var old_wh = @atomicLoad(u64, &self.framebuffer_wh, .SeqCst);
+            const old_size = unpackSize(old_wh);
+            var swap_chain = createSwapChain(device, state.surface, old_size.w, old_size.h);
+            var swap_chain_created = true;
+            defer swap_chain.release();
 
             while (!event_loop_broken.*) {
-                const wh = @atomicLoad(u64, &self.framebuffer_wh, .SeqCst);
-                const size = unpackSize(wh);
-                const swap_chain_resized = self.swap_chain_wh != wh;
-                if (swap_chain_resized) {
-                    self.swap_chain_wh = wh;
-                    self.swap_chain.release();
-                    self.swap_chain = createSwapChain(self.device, self.surface, size.w, size.h);
-                    frame_tracker.reset();
+                // 1) Report device loss to user (aborting if they signal so), then re-create it.
+                const device_changed = device_lost;
+                if (device_lost) {
+                    releaseDevice(device);
+                    {
+                        self.game_lock.lock();
+                        defer self.game_lock.unlock();
+
+                        // Run an update first since this is an exceptional event and may take time to resolve.
+                        self.update(game);
+                        var ctx = .{};
+                        table.onGpuDeviceLost(game, self.app_context, &ctx);
+                        if (self.app_context.should_close) {
+                            return error.Unknown;
+                        }
+                    }
+                    device_lost = false;
+                    device = try requestDevice(state.instance, &device_lost);
+                    device_created = true;
                 }
 
+                // 2) Report device (re-)creation to user.
+                if (device_created) {
+                    self.game_lock.lock();
+                    defer self.game_lock.unlock();
+
+                    // Run an update first since this is an exceptional event and may take time to resolve.
+                    self.update(game);
+                    var ctx = .{ .device = device };
+                    table.onGpuDeviceCreated(game, self.app_context, &ctx);
+                    device_created = false;
+                }
+
+                // 3) If any relevant state has changed, report swap-chain destruction to user, then re-create it.
+                const wh = @atomicLoad(u64, &self.framebuffer_wh, .SeqCst);
+                const size = unpackSize(wh);
+                const size_changed = old_wh != wh;
+                if (wh == 0) continue;
+                old_wh = wh;
+                if (device_changed or size_changed) {
+                    frame_tracker.reset();
+                    swap_chain.release();
+                    {
+                        self.game_lock.lock();
+                        defer self.game_lock.unlock();
+
+                        var ctx = .{ .device = device };
+                        table.onSwapChainDestroyed(game, self.app_context, &ctx);
+                    }
+                    swap_chain = createSwapChain(device, state.surface, size.w, size.h);
+                    swap_chain_created = true;
+                }
                 const estimated_fps = frame_tracker.estimateFps();
+                var view = swap_chain.getCurrentTextureView();
+                defer view.release();
 
-                var framebuffer_view = self.swap_chain.getCurrentTextureView();
-                defer framebuffer_view.release();
+                // 4) Report swap-chain (re-)creation to user.
+                if (swap_chain_created) {
+                    self.game_lock.lock();
+                    defer self.game_lock.unlock();
 
+                    var ctx = .{ .device = device, .framebuffer_size = size };
+                    table.onSwapChainCreated(game, self.app_context, &ctx);
+                    swap_chain_created = false;
+                }
+
+                // 5) Update and draw.
                 {
                     self.game_lock.lock();
                     defer self.game_lock.unlock();
 
-                    if (swap_chain_resized) {
-                        const gctx = GraphicsContext{ .device = self.device, .framebuffer_size = size };
-                        table.onSwapChainResized(game, self.app_context, gctx);
-                    }
-
                     self.update(game);
 
-                    const delta_ticks = self.timer.read() - self.world_timestamp;
-                    const fctx = FrameContext{
-                        .device = self.device,
-                        .framebuffer_view = framebuffer_view,
+                    // Read world timer immediately before draw.
+                    const delta_ticks = self.world_timer.read() - self.world_timestamp;
+                    var ctx = .{
+                        .device = device,
+                        .framebuffer_view = view,
                         .framebuffer_size = size,
                         .step_remainder = @as(f64, @floatFromInt(delta_ticks)) / @as(f64, @floatFromInt(ticks_per_step)),
                         .estimated_fps = estimated_fps,
                     };
-                    table.draw(game, self.app_context, fctx);
+                    table.draw(game, self.app_context, &ctx);
                 }
 
+                // 6) Advance the event loop and present.
                 glfw.postEmptyEvent();
-                self.swap_chain.present();
+                swap_chain.present();
                 frame_tracker.startOrLap();
             }
         }
@@ -887,7 +932,7 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                 self.app_context.netcode_client.freePacket(data);
             }
 
-            var timestamp = self.timer.read();
+            var timestamp = self.world_timer.read();
             var world_delta = timestamp - self.world_timestamp;
             if (world_delta < ticks_per_step) return;
 
@@ -1038,7 +1083,7 @@ const Joystick = struct {
 
     /// In addition to GLFW-reported errors, returns glfw.Error.Unknown if we can't read a detected joystick's state.
     pub fn stateChanged(joystick: *Joystick) glfw.Error!bool {
-        const jid = @as(i32, @intCast(joystick.id));
+        const jid: i32 = @intCast(joystick.id);
         if (!glfw.joystickPresent(jid)) {
             if (joystick.connected) {
                 joystick.connected = false;
@@ -1185,21 +1230,21 @@ const EventArgs = union(EventKind) {
 };
 
 // ====================================================================================================================
-// HELPER FUNCTIONS
+// GLFW
 
 fn logGlfwVersion() void {
-    std.log.info("Compiled against GLFW {}.{}.{}", .{ glfw.versionMajor, glfw.versionMinor, glfw.versionRevision });
+    Logger(.glfw).info("Compiled against GLFW {}.{}.{}", .{ glfw.versionMajor, glfw.versionMinor, glfw.versionRevision });
 
     var major: i32 = 0;
     var minor: i32 = 0;
     var revision: i32 = 0;
     glfw.getVersion(&major, &minor, &revision);
     const version_str = glfw.getVersionString();
-    std.log.info("Running against GLFW {}.{}.{} ({s})", .{ major, minor, revision, version_str });
+    Logger(.glfw).info("Running against GLFW {}.{}.{} ({s})", .{ major, minor, revision, version_str });
 }
 
 fn onGlfwError(error_code: ?glfw.Error, description: []const u8) void {
-    std.log.err("GLFW error {s}: {s}", .{ @errorName(error_code orelse glfw.Error.Unknown), description });
+    Logger(.glfw).err("GLFW error {s}: {s}", .{ @errorName(error_code orelse glfw.Error.Unknown), description });
 }
 
 fn getDisplayInfo(monitor: *Monitor) glfw.Error!DisplayInfo {
@@ -1211,7 +1256,7 @@ fn getDisplayInfo(monitor: *Monitor) glfw.Error!DisplayInfo {
     return .{
         .display_area = .{ .size = size, .pos = pos },
         .work_area = work_area,
-        .refresh_rate = @as(f32, @floatFromInt(vm.refreshRate)),
+        .refresh_rate = @floatFromInt(vm.refreshRate),
         .scale_factor = @min(scale.xscale, scale.yscale),
     };
 }
@@ -1219,12 +1264,12 @@ fn getDisplayInfo(monitor: *Monitor) glfw.Error!DisplayInfo {
 fn findMonitorMatch(point: ?Point, window: ?*Window) !*Monitor {
     var monitors = Monitor.getAll() catch return Monitor.getPrimary();
 
-    // 1. Try to return monitor at point, if given.
+    // 1) Try to return monitor at point, if given.
     if (point) |p| {
         if (getMonitorAtPoint(monitors, p.x, p.y)) |monitor| return monitor;
     }
 
-    // 2. Try to return monitor at center of window, if given.
+    // 2) Try to return monitor at center of window, if given.
     if (window) |w| b: {
         const wpos = w.getPos() catch break :b;
         const wsize = w.getSize() catch break :b;
@@ -1233,12 +1278,12 @@ fn findMonitorMatch(point: ?Point, window: ?*Window) !*Monitor {
         if (getMonitorAtPoint(monitors, wx, wy)) |monitor| return monitor;
     }
 
-    // 3. Try to return any monitor.
+    // 3) Try to return any monitor.
     for (monitors) |maybe_monitor| {
         if (maybe_monitor) |monitor| return monitor;
     }
 
-    // 4. Fall back on the primary monitor.
+    // 4) Fall back on the primary monitor.
     return Monitor.getPrimary();
 }
 
@@ -1260,15 +1305,9 @@ fn getMonitorAtPoint(monitors: []?*Monitor, x: i32, y: i32) ?*Monitor {
 }
 
 // ====================================================================================================================
-// GRAPHICS INITIALIZATION
+// WEBGPU
 
-const default_swap_chain_format = gpu.TextureFormat.bgra8_unorm;
-
-const GpuError = error{
-    NoAdapter,
-    NoDevice,
-};
-
+// TODO: move extern declarations out of main once Dawn dep is more settled
 const DawnNativeInstance = ?*opaque {};
 const DawnProcsTable = ?*opaque {};
 extern fn dniCreate() DawnNativeInstance;
@@ -1278,7 +1317,25 @@ extern fn dniDiscoverDefaultAdapters(DawnNativeInstance) void;
 extern fn dnGetProcs() DawnProcsTable;
 extern fn dawnProcSetProcs(DawnProcsTable) void;
 
-fn requestAdapter(instance: gpu.Instance) GpuError!gpu.Adapter {
+// TODO: examine swap_chain format
+const default_swap_chain_format = gpu.TextureFormat.bgra8_unorm;
+
+fn dawnLog(comptime level: std.log.Level, comptime log: []const u8, message: ?[*:0]const u8) void {
+    const L = Logger(.webgpu);
+    const fun = switch (level) {
+        .err => L.err,
+        .warn => L.warn,
+        .info => L.info,
+        .debug => L.debug,
+    };
+    if (message) |m| {
+        fun(log ++ ":\n{s}", .{m});
+    } else {
+        fun(log ++ ".", .{});
+    }
+}
+
+fn requestAdapter(instance: gpu.Instance) Error!gpu.Adapter {
     const Response = struct {
         waiting: bool = false,
         status: gpu.RequestAdapterStatus = .unknown,
@@ -1293,7 +1350,7 @@ fn requestAdapter(instance: gpu.Instance) GpuError!gpu.Adapter {
             message: ?[*:0]const u8,
             userdata: ?*anyopaque,
         ) callconv(.C) void {
-            const response = @as(*align(@alignOf(*usize)) Response, @ptrCast(@alignCast(userdata)));
+            const response: *align(@alignOf(*usize)) Response = @ptrCast(@alignCast(userdata));
             response.* = .{ .status = status, .adapter = adapter, .message = message };
         }
     }).value;
@@ -1302,51 +1359,35 @@ fn requestAdapter(instance: gpu.Instance) GpuError!gpu.Adapter {
     instance.requestAdapter(
         .{ .power_preference = .high_performance },
         callback,
-        @as(*anyopaque, @ptrCast(&response)),
+        &response,
     );
 
     // TODO: proper handling of requestAdapter "promise"
     while (response.waiting) {}
 
     if (response.status == .success) {
-        if (response.message) |message| {
-            Logger(.webgpu).info(
-                "Adapter successfully acquired. (message: \"{s}\")",
-                .{message},
-            );
-        } else {
-            Logger(.webgpu).info(
-                "Adapter successfully acquired.",
-                .{},
-            );
-        }
+        dawnLog(.info, "WebGPU adapter request successful", response.message);
+        return response.adapter;
     } else {
-        if (response.message) |message| {
-            Logger(.webgpu).err(
-                "Adapter request failed. (status: {s}, message: \"{s}\")",
-                .{ @tagName(response.status), message },
-            );
-        } else {
-            Logger(.webgpu).err(
-                "Adapter request failed. (status: {s})",
-                .{@tagName(response.status)},
-            );
+        switch (response.status) {
+            .unavailable => dawnLog(.err, "WebGPU adapter unavailable", response.message),
+            .err => dawnLog(.err, "WebGPU adapter request returned in error", response.message),
+            else => dawnLog(.err, "WebGPU adapter request failed for unknown reason", response.message),
         }
-        return GpuError.NoAdapter;
+        return Error.NoWebGpuAdapter;
     }
-    return response.adapter;
 }
 
-fn requestDevice(adapter: gpu.Adapter) GpuError!gpu.Device {
+fn requestDeviceFromAdapter(adapter: gpu.Adapter, device_lost: *bool) Error!gpu.Device {
     const dawn_skip_validation = false; // TODO: optionize skip_validation at either build or run time
-    const link = if (!dawn_skip_validation) null else result: {
+    const link: ?*const gpu.ChainedStruct = if (!dawn_skip_validation) null else result: {
         const toggles = [_][*:0]const u8{"skip_validation"};
         const dawn_toggles = gpu.DawnTogglesDeviceDescriptor{
             .chain = .{ .next = null, .struct_type = .dawn_toggles_device_descriptor },
             .force_enabled_toggles_count = toggles.len,
             .force_enabled_toggles = &toggles,
         };
-        break :result @as(*const gpu.ChainedStruct, @ptrCast(&dawn_toggles));
+        break :result @ptrCast(&dawn_toggles);
     };
 
     const Response = struct {
@@ -1363,7 +1404,7 @@ fn requestDevice(adapter: gpu.Adapter) GpuError!gpu.Device {
             message: ?[*:0]const u8,
             userdata: ?*anyopaque,
         ) callconv(.C) void {
-            const response = @as(*align(@alignOf(*usize)) Response, @ptrCast(@alignCast(userdata)));
+            const response: *Response = @ptrCast(@alignCast(userdata));
             response.* = .{ .status = status, .device = device, .message = message };
         }
     }).value;
@@ -1372,80 +1413,91 @@ fn requestDevice(adapter: gpu.Adapter) GpuError!gpu.Device {
     adapter.requestDevice(
         gpu.DeviceDescriptor{ .next_in_chain = link },
         callback,
-        @as(*anyopaque, @ptrCast(&response)),
+        &response,
     );
 
     // TODO: proper handling of requestDevice "promise"
     while (response.waiting) {}
 
-    if (response.status == .success) {
-        if (response.message) |message| {
-            Logger(.webgpu).info(
-                "Device successfully acquired. (message: \"{s}\")",
-                .{message},
-            );
-        } else {
-            Logger(.webgpu).info(
-                "Device successfully acquired.",
-                .{},
-            );
+    if (response.status != .success) {
+        switch (response.status) {
+            .err => dawnLog(.err, "WebGPU device request returned in error", response.message),
+            else => dawnLog(.err, "WebGPU device request failed for unknown reason", response.message),
         }
-    } else {
-        if (response.message) |message| {
-            Logger(.webgpu).err(
-                "Device request failed. (status: {s}, message: \"{s}\")",
-                .{ @tagName(response.status), message },
-            );
-        } else {
-            Logger(.webgpu).err(
-                "Device request failed. (status: {s})",
-                .{@tagName(response.status)},
-            );
-        }
-        return GpuError.NoDevice;
+        return Error.NoWebGpuDevice;
     }
 
-    // TODO: kick out these device callbacks
-    response.device.setLoggingCallback(deviceLoggingCallback, null);
-    response.device.setUncapturedErrorCallback(deviceUncapturedErrorCallback, null);
-    response.device.setDeviceLostCallback(deviceLostCallback, null);
+    const device = response.device;
+    errdefer device.release();
 
-    return response.device;
-}
+    dawnLog(.info, "WebGPU device request successful", response.message);
+    device.setLoggingCallback(deviceLoggingCallback, null);
+    device.setUncapturedErrorCallback(deviceUncapturedErrorCallback, null);
+    device.setDeviceLostCallback(deviceLostCallback, device_lost);
 
-fn deviceLoggingCallback(
-    log_type: gpu.LoggingType,
-    message: ?[*:0]const u8,
-    userdata: ?*anyopaque,
-) callconv(.C) void {
-    _ = userdata;
-    _ = message;
-    _ = log_type;
-}
-
-fn deviceUncapturedErrorCallback(
-    err_type: gpu.ErrorType,
-    message: ?[*:0]const u8,
-    userdata: ?*anyopaque,
-) callconv(.C) void {
-    _ = userdata;
-    if (message) |m| {
-        Logger(.webgpu).err("Uncaptured device error ({}):\n{s})", .{ err_type, m });
-    } else {
-        Logger(.webgpu).err("Uncaptured device error ({})", .{err_type});
+    if (use_imgui) {
+        if (imgui.wgpu.init(
+            device,
+            1,
+            @intFromEnum(default_swap_chain_format),
+            &.{},
+        )) {
+            Logger(.imgui).info("ImGui WebGPU backend initialization successful.", .{});
+        } else {
+            Logger(.imgui).err("ImGui WebGPU backend initialization failed.", .{});
+            return Error.ImGuiInitFailure;
+        }
     }
 
+    return device;
+}
+
+fn requestDevice(instance: gpu.Instance, device_lost: *bool) Error!gpu.Device {
+    const adapter = try requestAdapter(instance);
+    defer adapter.release();
+
+    return requestDeviceFromAdapter(adapter, device_lost);
+}
+
+fn releaseDevice(device: gpu.Device) void {
+    // TODO: there may be a better way to re-init with ImGui_ImplWGPU_InvalidateDeviceObjects and CreateDeviceObjects
+    if (use_imgui) imgui.wgpu.shutdown();
+    device.release();
+}
+
+fn deviceLoggingCallback(log_type: gpu.LoggingType, message: ?[*:0]const u8, userdata: ?*anyopaque) callconv(.C) void {
+    _ = userdata;
+    const log = "WebGPU device log";
+    switch (log_type) {
+        .verbose => dawnLog(.debug, log, message),
+        .info => dawnLog(.info, log, message),
+        .warning => dawnLog(.warn, log, message),
+        .err => dawnLog(.err, log, message),
+    }
+}
+
+fn deviceUncapturedErrorCallback(err_type: gpu.ErrorType, message: ?[*:0]const u8, userdata: ?*anyopaque) callconv(.C) void {
+    _ = userdata;
+    switch (err_type) {
+        .validation => dawnLog(.err, "Dawn validation error", message),
+        .out_of_memory => dawnLog(.err, "Dawn out of memory", message),
+        .internal => dawnLog(.err, "Dawn internal error", message),
+        .device_lost => dawnLog(.err, "WebGPU device lost", message),
+        .no_error, .unknown => dawnLog(.err, "Unknown Dawn error", message),
+    }
+
+    // TODO: attempt to recover gracefully from some error types (with framework user cooperation)
     std.process.exit(1);
 }
 
-fn deviceLostCallback(
-    reason: gpu.DeviceLostReason,
-    message: ?[*:0]const u8,
-    userdata: ?*anyopaque,
-) callconv(.C) void {
-    _ = userdata;
-    _ = message;
-    _ = reason;
+fn deviceLostCallback(reason: gpu.DeviceLostReason, message: ?[*:0]const u8, userdata: ?*anyopaque) callconv(.C) void {
+    var flag: *bool = @ptrCast(userdata);
+    flag.* = true;
+
+    switch (reason) {
+        .undef => dawnLog(.warn, "WebGPU device lost (not destroyed)", message),
+        .destroyed => dawnLog(.warn, "WebGPU device lost (destroyed)", message),
+    }
 }
 
 fn createSurface(instance: gpu.Instance, window: *glfw.Window) glfw.Error!gpu.Surface {
@@ -1457,7 +1509,7 @@ fn createSurface(instance: gpu.Instance, window: *glfw.Window) glfw.Error!gpu.Su
                 .hinstance = std.os.windows.kernel32.GetModuleHandleW(null).?,
                 .hwnd = try window.getWin32Window(),
             };
-            return instance.createSurface(.{ .next_in_chain = @as(*const gpu.ChainedStruct, @ptrCast(&desc)) });
+            return instance.createSurface(.{ .next_in_chain = @ptrCast(&desc) });
         },
 
         .linux => {
@@ -1466,7 +1518,7 @@ fn createSurface(instance: gpu.Instance, window: *glfw.Window) glfw.Error!gpu.Su
                 .display = try glfw.getX11Display(),
                 .window = try window.getX11Window(),
             };
-            return instance.createSurface(.{ .next_in_chain = @as(*const gpu.ChainedStruct, @ptrCast(&desc)) });
+            return instance.createSurface(.{ .next_in_chain = @ptrCast(&desc) });
         },
 
         .macos => {
@@ -1487,7 +1539,7 @@ fn createSurface(instance: gpu.Instance, window: *glfw.Window) glfw.Error!gpu.Su
                 .chain = .{ .next = null, .struct_type = .surface_descriptor_from_metal_layer },
                 .layer = layer,
             };
-            return instance.createSurface(.{ .next_in_chain = @as(*const gpu.ChainedStruct, @ptrCast(&desc)) });
+            return instance.createSurface(.{ .next_in_chain = @ptrCast(&desc) });
         },
 
         else => @compileError("Platform not supported."),
@@ -1525,13 +1577,14 @@ const objc = struct {
             1 => *const fn (@TypeOf(obj), SEL, args_meta[0].type) callconv(.C) ReturnType,
             else => @compileError("Too many params for objc msgSend (manually add support for more)."),
         };
-        const func = @as(FnType, @ptrCast(&objc_msgSend));
+        const func: FnType = @ptrCast(&objc_msgSend);
         const sel = sel_getUid(sel_name.ptr);
         return @call(.never_inline, func, .{ obj, sel } ++ args);
     }
 };
 
 // ====================================================================================================================
+// MISCELLANY
 
 /// A simple pseudo ring buffer for tracking frame rate.
 /// The type args are the minimum and maximum number of frames the tracker is allowed to use to estimate FPS.
@@ -1585,8 +1638,8 @@ fn FrameTracker(comptime min_frames: u32, comptime max_frames: u32) type {
                 median = (median + medianA) / 2;
             }
 
-            const ticks_per_frame = @as(f64, @floatFromInt(median));
-            const ticks_per_second = comptime @as(f64, @floatFromInt(std.time.ns_per_s));
+            const ticks_per_frame: f64 = @floatFromInt(median);
+            const ticks_per_second: comptime_float = @floatFromInt(std.time.ns_per_s);
             return ticks_per_second / ticks_per_frame;
         }
     };

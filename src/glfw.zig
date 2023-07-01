@@ -77,11 +77,16 @@ pub fn init() !void {
 
 pub const terminate = c.glfwTerminate;
 pub const waitEvents = c.glfwWaitEvents;
+pub const waitEventsTimeout = c.glfwWaitEventsTimeout;
 pub const postEmptyEvent = c.glfwPostEmptyEvent;
 
 extern fn glfwGetX11Display() ?*anyopaque;
 pub fn getX11Display() !*anyopaque {
     return glfwGetX11Display() orelse (getError() orelse Error.Unknown);
+}
+
+pub fn hintWindowVisible(value: bool) void {
+    c.glfwWindowHint(c.GLFW_VISIBLE, @intFromBool(value));
 }
 
 pub fn hintWindowMaximized(value: bool) void {
@@ -103,13 +108,13 @@ extern fn glfwGetJoystickButtons(jid: c_int, count: [*c]c_int) [*c]const JoyButt
 pub fn getJoystickButtons(jid: i32) !?[]const JoyButtonState {
     var count: i32 = 0;
     const ptr = glfwGetJoystickButtons(jid, &count) orelse return getError() orelse null;
-    return ptr[0..@as(usize, @intCast(count))];
+    return ptr[0..@intCast(count)];
 }
 
 pub fn getJoystickAxes(jid: i32) !?[]const f32 {
     var count: i32 = 0;
     const ptr = c.glfwGetJoystickAxes(jid, &count) orelse return getError() orelse null;
-    return ptr[0..@as(usize, @intCast(count))];
+    return ptr[0..@intCast(count)];
 }
 
 pub const JoyHatState = enum(u8) {
@@ -128,7 +133,7 @@ extern fn glfwGetJoystickHats(jid: c_int, count: [*c]c_int) [*c]const JoyHatStat
 pub fn getJoystickHats(jid: i32) !?[]const JoyHatState {
     var count: i32 = 0;
     const ptr = glfwGetJoystickHats(jid, &count) orelse return getError() orelse null;
-    return ptr[0..@as(usize, @intCast(count))];
+    return ptr[0..@intCast(count)];
 }
 
 pub fn getJoystickGuid(jid: i32) !?[]const u8 {
@@ -155,7 +160,7 @@ pub const Monitor = opaque {
     pub fn getAll() ![]?*Self {
         var count: i32 = 0;
         const handles = c.glfwGetMonitors(&count) orelse return getError() orelse return Error.Unknown;
-        return @as([*]?*Self, @ptrCast(handles))[0..@as(usize, @intCast(count))];
+        return @as([*]?*Self, @ptrCast(handles))[0..@intCast(count)];
     }
 
     pub fn setUserPointer(self: *Self, comptime T: type, pointer: ?*T) void {
@@ -164,7 +169,7 @@ pub const Monitor = opaque {
 
     pub fn getUserPointer(self: *Self, comptime T: type) ?*T {
         const user_ptr = glfwGetMonitorUserPointer(self) orelse return null;
-        return @as(*align(@sizeOf(*T)) T, @ptrCast(@alignCast(user_ptr)));
+        return @ptrCast(@alignCast(user_ptr));
     }
 
     pub fn getName(self: *Self) ?[]const u8 {
@@ -333,7 +338,7 @@ pub const Window = opaque {
     fn getUserObj(window: ?*Self, comptime T: type) ?*T {
         const w = window orelse return null;
         const user_ptr = glfwGetWindowUserPointer(w) orelse return null;
-        return @as(*align(@sizeOf(*T)) T, @ptrCast(@alignCast(user_ptr)));
+        return @ptrCast(@alignCast(user_ptr));
     }
 
     const GLFWwindowposfun = fn (?*Self, c_int, c_int) callconv(.C) void;
@@ -465,7 +470,7 @@ pub const Window = opaque {
             fn value(window: ?*Self, codepoint: c_uint) callconv(.C) void {
                 const obj = getUserObj(window, T) orelse return;
                 if (codepoint > 0x1FFFFF) return;
-                var cp = @as(u21, @intCast(codepoint));
+                var cp: u21 = @intCast(codepoint);
                 if (!std.unicode.utf8ValidCodepoint(cp)) return;
                 callback(obj, cp);
             }
