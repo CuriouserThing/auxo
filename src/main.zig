@@ -1,10 +1,13 @@
+const builtin = @import("builtin");
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const Timer = std.time.Timer;
-const Mutex = std.Thread.Mutex;
-const os: std.Target.Os.Tag = @import("builtin").os.tag;
-
+pub const gpu = @import("wgpu");
+pub const gui = @import("zgui");
+const netcode = @import("netcode");
 const io = @import("io.zig");
+const glfw = @import("glfw.zig");
+const imgui = @import("imgui.zig");
+const utils = @import("utils.zig");
+
 pub const Cardinal = io.Cardinal;
 pub const Point = io.Point;
 pub const Size = io.Size;
@@ -35,14 +38,12 @@ pub const JOY_BUTTON_MAX = io.JOY_BUTTON_MAX;
 pub const JOY_AXIS_MAX = io.JOY_AXIS_MAX;
 pub const JOY_HAT_MAX = io.JOY_HAT_MAX;
 
-pub const gpu = @import("wgpu");
-pub const gui = @import("zgui");
-const imgui = @import("imgui.zig");
-
-const netcode = @import("netcode");
-const glfw = @import("glfw.zig");
 const Monitor = glfw.Monitor;
 const Window = glfw.Window;
+const FrameTracker = utils.FrameTracker;
+const RingBuffer = utils.RingBuffer;
+
+const os = builtin.os;
 
 // TODO: make this a proper build option
 const use_imgui = true;
@@ -401,7 +402,7 @@ pub fn runLoopback(
     comptime LoopbackServer: type,
     comptime loopback_server_run: fn (*LoopbackServer, *LoopbackContext) void,
     loopback_server: *LoopbackServer,
-    allocator: Allocator,
+    allocator: std.mem.Allocator,
 ) !void {
     var loopback = LoopbackContext{};
     const server_thread = try std.Thread.spawn(.{}, loopback_server_run, .{ loopback_server, &loopback });
@@ -417,7 +418,7 @@ pub fn run(
     comptime game_table: GameTable(Game),
     comptime config: Config,
     game: *Game,
-    allocator: Allocator,
+    allocator: std.mem.Allocator,
 ) !void {
     try runInternal(Game, game_table, config, game, allocator, null);
 }
@@ -430,7 +431,7 @@ fn runInternal(
     comptime game_table: GameTable(Game),
     comptime config: Config,
     game: *Game,
-    allocator: Allocator,
+    allocator: std.mem.Allocator,
     loopback: ?*LoopbackContext,
 ) !void {
     try netcode.init();
@@ -515,7 +516,7 @@ fn runInternal(
         .config = config,
         .game = game,
         .app = &app,
-        .world_timer = try Timer.start(),
+        .world_timer = try std.time.Timer.start(),
         .event_reader = .{ .buffer = &event_buffer },
     };
     var event_loop_state = .{
@@ -624,7 +625,7 @@ const WindowWrapper = struct {
     restored_pos: Point,
     restored_size: Size,
     was_maximized: bool,
-    fake_fullscreen_on: if (os == .windows) bool else void = if (os == .windows) false else {},
+    fake_fullscreen_on: if (os.tag == .windows) bool else void = if (os.tag == .windows) false else {},
 
     pub fn init(self: *@This(), initial_mode: ModeChange) !void {
         try self.changeMode(initial_mode);
@@ -688,7 +689,7 @@ const WindowWrapper = struct {
     }
 
     fn onMaximize(self: *@This(), value: bool) void {
-        if (os != .windows or !self.fake_fullscreen_on) {
+        if (os.tag != .windows or !self.fake_fullscreen_on) {
             self.was_maximized = value;
         }
     }
@@ -734,7 +735,7 @@ const WindowWrapper = struct {
 
     fn shouldCacheRestoredBounds(self: @This()) bool {
         // Don't cache if fake fullscreen
-        if (os == .windows and self.fake_fullscreen_on) return false;
+        if (os.tag == .windows and self.fake_fullscreen_on) return false;
 
         // Don't cache if real fullscreen
         if (self.window.getFullscreenMonitor()) |_| return false;
@@ -751,7 +752,7 @@ const WindowWrapper = struct {
     fn changeMode(self: *@This(), mode_change: ModeChange) glfw.Error!void {
         if (self.window.getFullscreenMonitor()) |_| {
             try self.changeRealFullscreen(mode_change);
-        } else if (os == .windows and self.fake_fullscreen_on) {
+        } else if (os.tag == .windows and self.fake_fullscreen_on) {
             try self.changeFakeFullscreen(mode_change);
         } else {
             try self.changeWindowed(mode_change);
@@ -791,7 +792,7 @@ const WindowWrapper = struct {
                 const mode = mode_change.fullscreen;
                 const monitor = try findMonitorMatch(mode.monitor_location, self.window);
                 const exclusive = mode.exclusive orelse false;
-                if (os == .windows and !exclusive) {
+                if (os.tag == .windows and !exclusive) {
                     try self.turnCompositedToFakeFullscreen(monitor);
                 } else {
                     const vm = try monitor.getVideoMode();
@@ -814,7 +815,7 @@ const WindowWrapper = struct {
                 const mode = mode_change.fullscreen;
                 const monitor = try findMonitorMatch(mode.monitor_location, self.window);
                 const exclusive = mode.exclusive orelse false;
-                if (os == .windows and !exclusive) {
+                if (os.tag == .windows and !exclusive) {
                     self.turnRealFullscreenToWindowed();
                     try self.turnCompositedToFakeFullscreen(monitor);
                 } else {
@@ -838,7 +839,7 @@ const WindowWrapper = struct {
                 const mode = mode_change.fullscreen;
                 const monitor = try findMonitorMatch(mode.monitor_location, self.window);
                 const exclusive = mode.exclusive orelse false;
-                if (os == .windows and !exclusive) {
+                if (os.tag == .windows and !exclusive) {
                     try self.turnCompositedToFakeFullscreen(monitor);
                 } else {
                     self.turnFakeFullscreenToWindowed();
@@ -926,9 +927,9 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
         game: *Game,
         app: *App,
         event_reader: EventReader,
-        world_timer: Timer,
+        world_timer: std.time.Timer,
         world_timestamp: u64 = 0,
-        game_lock: Mutex = .{},
+        game_lock: std.Thread.Mutex = .{},
 
         fn eventLoop(self: *@This(), state: *EventLoopState, render_loop_state: *RenderLoopState) !void {
             const game = self.game;
@@ -994,7 +995,7 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
             const game = self.game;
             const app = self.app;
 
-            var frame_tracker: FrameTracker(60, 240) = .{ .timer = try Timer.start() };
+            var frame_tracker: FrameTracker(60, 240) = .{ .timer = try std.time.Timer.start() };
 
             var device_lost = false;
             var device = try requestDevice(state.instance, &device_lost);
@@ -1616,7 +1617,7 @@ fn deviceLostCallback(reason: gpu.DeviceLostReason, message: ?[*:0]const u8, use
 
 fn createSurface(instance: gpu.Instance, window: *glfw.Window) glfw.Error!gpu.Surface {
     // TODO: more robust windowing system switch (and error on Wayland)
-    switch (os) {
+    switch (os.tag) {
         .windows => {
             var desc = gpu.SurfaceDescriptorFromWindowsHWND{
                 .chain = .{ .next = null, .struct_type = .surface_descriptor_from_windows_hwnd },
@@ -1696,146 +1697,3 @@ const objc = struct {
         return @call(.never_inline, func, .{ obj, sel } ++ args);
     }
 };
-
-// ====================================================================================================================
-// UTILS
-
-/// A simple pseudo ring buffer for tracking frame rate.
-/// The type args are the minimum and maximum number of frames the tracker is allowed to use to estimate FPS.
-/// Not thread-safe.
-fn FrameTracker(comptime min_frames: u32, comptime max_frames: u32) type {
-    if (min_frames > max_frames) @compileError("min_frames > max_frames");
-    return struct {
-        timer: Timer,
-        started: bool = false,
-        head: usize = 0,
-        size: usize = 0,
-        buffer: [max_frames]u64 = [_]u64{undefined} ** max_frames,
-        buffer_sorted: [max_frames]u64 = [_]u64{undefined} ** max_frames,
-
-        /// Starts the tracker if needed, or laps and records the frame time. Must be called exactly once each frame, at the same point in the frame (e.g. right after swapping buffers).
-        pub fn startOrLap(self: *@This()) void {
-            if (!self.started) {
-                self.timer.reset();
-                self.started = true;
-                return;
-            }
-
-            self.buffer[self.head] = self.timer.lap();
-            self.head = (self.head +% 1) % max_frames;
-            if (self.size < max_frames) self.size += 1;
-
-            const s = self.size;
-            std.mem.copy(u64, self.buffer_sorted[0..s], self.buffer[0..s]);
-            std.sort.pdq(u64, self.buffer_sorted[0..s], {}, comptime std.sort.asc(u64));
-        }
-
-        /// Clear all recorded frame times from the buffer, starting fresh.
-        pub fn reset(self: *@This()) void {
-            // No point in clearing buffers themselves.
-            self.started = false;
-            self.head = 0;
-            self.size = 0;
-        }
-
-        /// Get an estimate of FPS. Returns null if the tracker hasn't recorded sufficient data to estimate frame rate.
-        pub fn estimateFps(self: *@This()) ?f64 {
-            const s = self.size;
-            if (s < min_frames or s == 0) return null;
-
-            // Median is the middle value if an odd total, or the average of the two middle values if an even total.
-            var median = self.buffer_sorted[s / 2];
-            if (s % 2 == 0) {
-                const medianA = self.buffer_sorted[s / 2 - 1];
-                median = (median + medianA) / 2;
-            }
-
-            const ticks_per_frame: f64 = @floatFromInt(median);
-            const ticks_per_second: comptime_float = @floatFromInt(std.time.ns_per_s);
-            return ticks_per_second / ticks_per_frame;
-        }
-    };
-}
-
-/// Single-writer, single-reader buffer. Requires at least one dedicated (write-free) reader thread, but the reader can also run on any writer thread.
-/// Lockless when under capacity.
-fn RingBuffer(comptime size: usize, comptime T: type) type {
-    if (size < 3) @compileError("Ring buffer must hold at least 3 items.");
-    return struct {
-        items: [size]T = [_]T{undefined} ** size,
-        head: usize = 0, // location of next write (exclusive end)
-        tail: usize = 0, // location of next read (inclusive start)
-        sync: usize = 0,
-        read_unreleased: bool = false,
-        read_completed: bool = false,
-        mutex: std.Thread.Mutex = .{},
-        condition: std.Thread.Condition = .{},
-
-        pub fn write(self: *@This(), item: T) void {
-            // Write item
-            const head = @atomicLoad(usize, &self.head, .SeqCst);
-            self.items[head] = item;
-
-            // If buffer is now full, wait for a read under lock
-            const next_head = (head +% 1) % size;
-            const tail = @atomicLoad(usize, &self.tail, .SeqCst);
-            if (next_head == tail) {
-                self.mutex.lock();
-                defer self.mutex.unlock();
-
-                // Attempt to signal wait by advancing sync
-                // If we can't, reader completed at least one read since we loaded read tail
-                const next_tail = (tail +% 1) % size;
-                if (@cmpxchgStrong(usize, &self.sync, tail, next_tail, .SeqCst, .SeqCst) == null) {
-                    while (!self.read_completed) {
-                        self.condition.wait(&self.mutex);
-                    }
-                    self.read_completed = false;
-                }
-            }
-
-            // Advance write head
-            @atomicStore(usize, &self.head, next_head, .SeqCst);
-        }
-
-        pub fn read(self: *@This()) ?T {
-            const item = self.readWithoutRelease() orelse return null;
-            self.releasePreviousRead();
-            return item;
-        }
-
-        pub fn readWithoutRelease(self: *@This()) ?T {
-            // Return null if the buffer is empty
-            const tail = @atomicLoad(usize, &self.tail, .SeqCst);
-            const head = @atomicLoad(usize, &self.head, .SeqCst);
-            if (tail == head) return null;
-
-            // Read item if previous item was released
-            if (@cmpxchgStrong(bool, &self.read_unreleased, false, true, .SeqCst, .SeqCst) == null) {
-                return self.items[tail];
-            } else {
-                return null;
-            }
-        }
-
-        pub fn releasePreviousRead(self: *@This()) void {
-            // Return if already released
-            if (@cmpxchgStrong(bool, &self.read_unreleased, true, false, .SeqCst, .SeqCst) != null) return;
-
-            // Advance read tail
-            const tail = @atomicLoad(usize, &self.tail, .SeqCst);
-            const next_tail = (tail +% 1) % size;
-            @atomicStore(usize, &self.tail, next_tail, .SeqCst);
-
-            // Attempt to signal read by advancing sync
-            // If we can't, writer is waiting under lock, so we must complete read under lock and signal it via condition
-            if (@cmpxchgStrong(usize, &self.sync, tail, next_tail, .SeqCst, .SeqCst) != null) {
-                self.mutex.lock();
-                defer self.mutex.unlock();
-
-                self.read_completed = true;
-                self.condition.signal();
-            }
-        }
-    };
-}

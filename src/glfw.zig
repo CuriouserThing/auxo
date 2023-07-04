@@ -2,8 +2,8 @@ const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
 const std = @import("std");
-
 const io = @import("io.zig");
+
 const Point = io.Point;
 const Size = io.Size;
 const Rectangle = io.Rectangle;

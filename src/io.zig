@@ -116,7 +116,10 @@ pub const JoyInputSource = enum {
     hat_west,
 };
 
-pub const JoyInputIndex = std.meta.Int(.unsigned, math.log2_int_ceil(usize, @max(JOY_BUTTON_MAX, @max(JOY_AXIS_MAX, JOY_HAT_MAX))));
+pub const JoyInputIndex = std.meta.Int(
+    .unsigned,
+    math.log2_int_ceil(usize, @max(JOY_BUTTON_MAX, @max(JOY_AXIS_MAX, JOY_HAT_MAX))),
+);
 
 pub const JoyInput = struct {
     source: JoyInputSource,
