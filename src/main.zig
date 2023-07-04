@@ -123,18 +123,19 @@ pub const DrawContext = struct {
     step_remainder: u64,
     estimated_fps: ?f64 = null,
 
-    pub fn newGuiFrame(ctx: DrawContext) void {
+    /// This replaces a call to `gui.newFrame()`, wrapping the appropriate backend functionality.
+    pub fn guiNewFrame(ctx: DrawContext) void {
         if (!use_imgui) return;
 
         const size = ctx.framebuffer_size;
         imgui.wgpu.newFrame();
-        imgui.glfw.newFrame();
         gui.io.setDisplaySize(@floatFromInt(size.w), @floatFromInt(size.h));
         gui.io.setDisplayFramebufferScale(1.0, 1.0);
         gui.newFrame();
     }
 
-    pub fn renderGui(ctx: DrawContext, encoder: gpu.CommandEncoder) void {
+    /// This replaces a call to `gui.render()`, wrapping the appropriate backend functionality.
+    pub fn guiRender(ctx: DrawContext, encoder: gpu.CommandEncoder) void {
         if (!use_imgui) return;
 
         const color_attachments = [_]gpu.RenderPassColorAttachment{.{
@@ -959,6 +960,10 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
 
             // Swallow GLFW errors inside loop and rely on GLFW error callback for logging
             while (!app.should_close and !render_loop_aborted) {
+                // We call this here because it's thread-safer to call it on the event thread rather than the render thread.
+                // There doesn't currently seem to be an issue with this approach.
+                imgui.glfw.newFrame();
+
                 const display_state_changed = state.displays.stateChanged() catch true;
 
                 var joy_states_changed = [_]bool{false} ** glfw.JOYSTICK_COUNT;
