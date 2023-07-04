@@ -80,30 +80,34 @@ pub const Error = error{
 
 pub fn GameTable(comptime Game: type) type {
     return struct {
-        step: fn (*Game, *App, StepContext) void,
-        draw: fn (*Game, *App, DrawContext) void,
+        fn Fn(comptime Args: type) type {
+            return fn (*Game, *App, Args) void;
+        }
 
-        handleSkippedSteps: fn (*Game, *App, SkippedStepsContext) void,
-        handleWindowOpen: fn (*Game, *App, WindowOpenContext) void,
-        handleCloseRequest: fn (*Game, *App, CloseRequestContext) void,
-        handleGpuDeviceCreation: fn (*Game, *App, GpuDeviceCreationContext) void,
-        handleGpuDeviceLoss: fn (*Game, *App, GpuDeviceLossContext) void,
-        handleSwapChainCreation: fn (*Game, *App, SwapChainCreationContext) void,
-        handleSwapChainDestruction: fn (*Game, *App, SwapChainDestructionContext) void,
+        step: Fn(StepContext),
+        draw: Fn(DrawContext),
 
-        receiveFocusState: fn (*Game, *App, FocusStateArgs) void = ignore(FocusStateArgs),
-        receiveIconifyState: fn (*Game, *App, IconifyStateArgs) void = ignore(IconifyStateArgs),
-        receiveKeyAction: fn (*Game, *App, KeyActionArgs) void = ignore(KeyActionArgs),
-        receiveCharInput: fn (*Game, *App, CharInputArgs) void = ignore(CharInputArgs),
-        receiveMouseButtonAction: fn (*Game, *App, MouseButtonActionArgs) void = ignore(MouseButtonActionArgs),
-        receiveMouseScroll: fn (*Game, *App, MouseScrollArgs) void = ignore(MouseScrollArgs),
-        receiveCursorPosition: fn (*Game, *App, CursorPositionArgs) void = ignore(CursorPositionArgs),
-        receiveCursorEntryState: fn (*Game, *App, CursorEntryStateArgs) void = ignore(CursorEntryStateArgs),
-        receiveJoyState: fn (*Game, *App, JoyStateArgs) void = ignore(JoyStateArgs),
-        receiveDisplayState: fn (*Game, *App, DisplayStateArgs) void = ignore(DisplayStateArgs),
-        receiveServerData: fn (*Game, *App, ServerDataArgs) void = ignore(ServerDataArgs),
+        handleSkippedSteps: Fn(SkippedStepsContext),
+        handleWindowOpen: Fn(WindowOpenContext),
+        handleCloseRequest: Fn(CloseRequestContext),
+        handleGpuDeviceCreation: Fn(GpuDeviceCreationContext),
+        handleGpuDeviceLoss: Fn(GpuDeviceLossContext),
+        handleSwapChainCreation: Fn(SwapChainCreationContext),
+        handleSwapChainDestruction: Fn(SwapChainDestructionContext),
 
-        fn ignore(comptime Args: type) fn (*Game, *App, Args) void {
+        receiveFocusState: Fn(FocusStateArgs) = ignore(FocusStateArgs),
+        receiveIconifyState: Fn(IconifyStateArgs) = ignore(IconifyStateArgs),
+        receiveKeyAction: Fn(KeyActionArgs) = ignore(KeyActionArgs),
+        receiveCharInput: Fn(CharInputArgs) = ignore(CharInputArgs),
+        receiveMouseButtonAction: Fn(MouseButtonActionArgs) = ignore(MouseButtonActionArgs),
+        receiveMouseScroll: Fn(MouseScrollArgs) = ignore(MouseScrollArgs),
+        receiveCursorPosition: Fn(CursorPositionArgs) = ignore(CursorPositionArgs),
+        receiveCursorEntryState: Fn(CursorEntryStateArgs) = ignore(CursorEntryStateArgs),
+        receiveJoyState: Fn(JoyStateArgs) = ignore(JoyStateArgs),
+        receiveDisplayState: Fn(DisplayStateArgs) = ignore(DisplayStateArgs),
+        receiveServerData: Fn(ServerDataArgs) = ignore(ServerDataArgs),
+
+        fn ignore(comptime Args: type) Fn(Args) {
             return (struct {
                 fn value(_: *Game, _: *App, _: Args) void {}
             }).value;
