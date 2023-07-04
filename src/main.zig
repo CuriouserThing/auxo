@@ -758,15 +758,15 @@ const WindowWrapper = struct {
 
     fn changeMode(self: *@This(), mode_change: ModeChange) glfw.Error!void {
         if (self.window.getFullscreenMonitor()) |_| {
-            try self.changeRealFullscreen(mode_change);
+            try self.changeFromRealFullscreen(mode_change);
         } else if (os.tag == .windows and self.fake_fullscreen_on) {
-            try self.changeFakeFullscreen(mode_change);
+            try self.changeFromFakeFullscreen(mode_change);
         } else {
-            try self.changeWindowed(mode_change);
+            try self.changeFromWindowed(mode_change);
         }
     }
 
-    fn changeWindowed(self: *@This(), mode_change: ModeChange) !void {
+    fn changeFromWindowed(self: *@This(), mode_change: ModeChange) !void {
         switch (mode_change.kind) {
             .none => return,
             .set_windowed => {
@@ -809,7 +809,7 @@ const WindowWrapper = struct {
         }
     }
 
-    fn changeRealFullscreen(self: *@This(), mode_change: ModeChange) !void {
+    fn changeFromRealFullscreen(self: *@This(), mode_change: ModeChange) !void {
         switch (mode_change.kind) {
             .none => return,
             .set_windowed, .toggle_fullscreen => {
@@ -833,7 +833,7 @@ const WindowWrapper = struct {
         }
     }
 
-    fn changeFakeFullscreen(self: *@This(), mode_change: ModeChange) !void {
+    fn changeFromFakeFullscreen(self: *@This(), mode_change: ModeChange) !void {
         switch (mode_change.kind) {
             .none => return,
             .set_windowed, .toggle_fullscreen => {
@@ -960,8 +960,8 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
 
             // Swallow GLFW errors inside loop and rely on GLFW error callback for logging
             while (!app.should_close and !render_loop_aborted) {
-                // We call this here because it's thread-safer to call it on the event thread rather than the render thread.
-                // There doesn't currently seem to be an issue with this approach.
+                // We call this here because it's thread-safer to call it on the event thread than the render thread.
+                // There doesn't currently seem to be an issue with this approach (which the code bears out).
                 imgui.glfw.newFrame();
 
                 const display_state_changed = state.displays.stateChanged() catch true;
@@ -986,7 +986,6 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                     }
 
                     self.update();
-
                     window_changes = app.dequeueWindowChanges();
                 }
 
@@ -1086,7 +1085,6 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                     defer self.game_lock.unlock();
 
                     self.update();
-
                     var world_delta = self.world_timer.read() - self.world_timestamp;
                     table.draw(game, app, .{
                         .device = device,
