@@ -1708,3 +1708,9 @@ const objc = struct {
         return @call(.never_inline, func, .{ obj, sel } ++ args);
     }
 };
+
+// ====================================================================================================================
+
+test "@sizeOf(EventArgs)" {
+    try std.testing.expect(@sizeOf(EventArgs) <= 24);
+}
