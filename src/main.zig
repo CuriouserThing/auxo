@@ -93,17 +93,23 @@ pub fn GameTable(comptime Game: type) type {
         handleSwapChainCreation: fn (*Game, *App, SwapChainCreationContext) void,
         handleSwapChainDestruction: fn (*Game, *App, SwapChainDestructionContext) void,
 
-        receiveFocusState: fn (*Game, *App, FocusStateArgs) void,
-        receiveIconifyState: fn (*Game, *App, IconifyStateArgs) void,
-        receiveKeyAction: fn (*Game, *App, KeyActionArgs) void,
-        receiveCharInput: fn (*Game, *App, CharInputArgs) void,
-        receiveMouseButtonAction: fn (*Game, *App, MouseButtonActionArgs) void,
-        receiveMouseScroll: fn (*Game, *App, MouseScrollArgs) void,
-        receiveCursorPosition: fn (*Game, *App, CursorPositionArgs) void,
-        receiveCursorEntryState: fn (*Game, *App, CursorEntryStateArgs) void,
-        receiveJoyState: fn (*Game, *App, JoyStateArgs) void,
-        receiveDisplayState: fn (*Game, *App, DisplayStateArgs) void,
-        receiveServerData: fn (*Game, *App, ServerDataArgs) void,
+        receiveFocusState: fn (*Game, *App, FocusStateArgs) void = ignore(FocusStateArgs),
+        receiveIconifyState: fn (*Game, *App, IconifyStateArgs) void = ignore(IconifyStateArgs),
+        receiveKeyAction: fn (*Game, *App, KeyActionArgs) void = ignore(KeyActionArgs),
+        receiveCharInput: fn (*Game, *App, CharInputArgs) void = ignore(CharInputArgs),
+        receiveMouseButtonAction: fn (*Game, *App, MouseButtonActionArgs) void = ignore(MouseButtonActionArgs),
+        receiveMouseScroll: fn (*Game, *App, MouseScrollArgs) void = ignore(MouseScrollArgs),
+        receiveCursorPosition: fn (*Game, *App, CursorPositionArgs) void = ignore(CursorPositionArgs),
+        receiveCursorEntryState: fn (*Game, *App, CursorEntryStateArgs) void = ignore(CursorEntryStateArgs),
+        receiveJoyState: fn (*Game, *App, JoyStateArgs) void = ignore(JoyStateArgs),
+        receiveDisplayState: fn (*Game, *App, DisplayStateArgs) void = ignore(DisplayStateArgs),
+        receiveServerData: fn (*Game, *App, ServerDataArgs) void = ignore(ServerDataArgs),
+
+        fn ignore(comptime Args: type) fn (*Game, *App, Args) void {
+            return (struct {
+                fn value(_: *Game, _: *App, _: Args) void {}
+            }).value;
+        }
     };
 }
 
