@@ -1,11 +1,12 @@
 const builtin = @import("builtin");
 const std = @import("std");
+pub const options = @import("options");
 pub const gpu = @import("wgpu");
-pub const gui = @import("zgui");
+pub const gui = if (options.use_imgui) @import("zgui") else {};
 const netcode = @import("netcode");
 const io = @import("io.zig");
 const glfw = @import("glfw.zig");
-const imgui = @import("imgui.zig");
+const imgui = if (options.use_imgui) @import("imgui.zig") else {};
 const utils = @import("utils.zig");
 
 pub const Cardinal = io.Cardinal;
@@ -44,9 +45,6 @@ const FrameTracker = utils.FrameTracker;
 const RingBuffer = utils.RingBuffer;
 
 const os = builtin.os;
-
-// TODO: make this a proper build option
-const use_imgui = true;
 
 // ====================================================================================================================
 // LOGGING & ERRORS
@@ -125,7 +123,7 @@ pub const DrawContext = struct {
 
     /// This replaces a call to `gui.newFrame()`, wrapping the appropriate backend functionality.
     pub fn guiNewFrame(ctx: DrawContext) void {
-        if (!use_imgui) return;
+        if (!options.use_imgui) return;
 
         const size = ctx.framebuffer_size;
         imgui.wgpu.newFrame();
@@ -136,7 +134,7 @@ pub const DrawContext = struct {
 
     /// This replaces a call to `gui.render()`, wrapping the appropriate backend functionality.
     pub fn guiRender(ctx: DrawContext, encoder: gpu.CommandEncoder) void {
-        if (!use_imgui) return;
+        if (!options.use_imgui) return;
 
         const color_attachments = [_]gpu.RenderPassColorAttachment{.{
             .view = ctx.framebuffer_view,
@@ -458,8 +456,8 @@ fn runInternal(
         .loopback = loopback,
     };
 
-    if (use_imgui) gui.init(allocator);
-    defer if (use_imgui) gui.deinit();
+    if (options.use_imgui) gui.init(allocator);
+    defer if (options.use_imgui) gui.deinit();
 
     logGlfwVersion();
     glfw.setErrorCallback(onGlfwError);
@@ -492,7 +490,7 @@ fn runInternal(
     try window_wrapper.init(window_changes.mode_change);
 
     // Hook ImGui callbacks in-between hooking Auxo callbacks and showing window
-    if (use_imgui) {
+    if (options.use_imgui) {
         if (imgui.glfw.initForOther(window, true)) {
             Logger(.imgui).info("ImGui GLFW backend initialization successful.", .{});
         } else {
@@ -500,7 +498,7 @@ fn runInternal(
             return Error.ImGuiInitFailure;
         }
     }
-    defer if (use_imgui) imgui.glfw.shutdown();
+    defer if (options.use_imgui) imgui.glfw.shutdown();
 
     window.show();
 
@@ -962,7 +960,7 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
             while (!app.should_close and !render_loop_aborted) {
                 // We call this here because it's thread-safer to call it on the event thread than the render thread.
                 // There doesn't currently seem to be an issue with this approach (which the code bears out).
-                imgui.glfw.newFrame();
+                if (options.use_imgui) imgui.glfw.newFrame();
 
                 const display_state_changed = state.displays.stateChanged() catch true;
 
@@ -1559,7 +1557,7 @@ fn requestDeviceFromAdapter(adapter: gpu.Adapter, device_lost: *bool) Error!gpu.
     device.setUncapturedErrorCallback(deviceUncapturedErrorCallback, null);
     device.setDeviceLostCallback(deviceLostCallback, device_lost);
 
-    if (use_imgui) {
+    if (options.use_imgui) {
         if (imgui.wgpu.init(
             device,
             1,
@@ -1585,7 +1583,7 @@ fn requestDevice(instance: gpu.Instance, device_lost: *bool) Error!gpu.Device {
 
 fn releaseDevice(device: gpu.Device) void {
     // TODO: there may be a better way to re-init with ImGui_ImplWGPU_InvalidateDeviceObjects and CreateDeviceObjects
-    if (use_imgui) imgui.wgpu.shutdown();
+    if (options.use_imgui) imgui.wgpu.shutdown();
     device.release();
 }
 

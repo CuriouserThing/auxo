@@ -23,19 +23,30 @@ pub fn build(b: *std.Build) void {
     demo.build(b);
 }
 
+pub const Options = struct {
+    use_imgui: bool = false,
+
+    fn createModule(self: @This(), b: *std.Build) *std.Build.Module {
+        const options = b.addOptions();
+        options.addOption(bool, "use_imgui", self.use_imgui);
+        return options.createModule();
+    }
+};
+
 pub const Package = struct {
     module: *std.Build.Module,
     glfw: *std.Build.CompileStep,
     zgui_package: zgui.Package,
     netcode_package: netcode.Package,
 
-    pub fn build(b: *std.Build, target: std.zig.CrossTarget, optimize: std.builtin.Mode) !Package {
+    pub fn build(b: *std.Build, target: std.zig.CrossTarget, optimize: std.builtin.Mode, options: Options) !Package {
         const wgpu_module = b.createModule(.{ .source_file = .{ .path = zgpuDir() ++ "/src/wgpu.zig" }, .dependencies = &.{} });
         const zgui_package = zgui.package(b, target, optimize, .{ .options = .{ .backend = .glfw_wgpu } });
         const netcode_package = try netcode.Package.build(b, target, optimize);
         const module = b.createModule(.{
             .source_file = .{ .path = thisDir() ++ "/src/main.zig" },
             .dependencies = &.{
+                .{ .name = "options", .module = options.createModule(b) },
                 .{ .name = "wgpu", .module = wgpu_module },
                 .{ .name = "zgui", .module = zgui_package.zgui },
                 .{ .name = "netcode", .module = netcode_package.module },
@@ -49,15 +60,15 @@ pub const Package = struct {
         };
     }
 
-    pub fn linkTo(package: Package, exe: *std.Build.CompileStep) !void {
+    pub fn linkTo(self: @This(), exe: *std.Build.CompileStep) !void {
         // TODO: monitor the Windows LTO bug (#8531, #15958) that forces this tweak
         exe.want_lto = false;
 
         exe.addIncludePath(glfwDir() ++ "/include");
-        exe.linkLibrary(package.glfw);
-        try package.netcode_package.linkTo(exe);
+        exe.linkLibrary(self.glfw);
+        try self.netcode_package.linkTo(exe);
         try linkDawnTo(exe);
-        package.zgui_package.link(exe);
+        self.zgui_package.link(exe);
     }
 };
 
