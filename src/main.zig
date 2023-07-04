@@ -35,8 +35,6 @@ pub const JOY_BUTTON_MAX = io.JOY_BUTTON_MAX;
 pub const JOY_AXIS_MAX = io.JOY_AXIS_MAX;
 pub const JOY_HAT_MAX = io.JOY_HAT_MAX;
 
-pub const Seconds = f64;
-
 pub const gpu = @import("wgpu");
 pub const gui = @import("zgui");
 const imgui = @import("imgui.zig");
@@ -48,6 +46,9 @@ const Window = glfw.Window;
 
 // TODO: make this a proper build option
 const use_imgui = true;
+
+// ====================================================================================================================
+// LOGGING & ERRORS
 
 /// Enumeration of strongly-typed log scopes.
 pub const LogScope = enum {
@@ -68,78 +69,111 @@ fn Logger(comptime scope: @Type(.EnumLiteral)) type {
     return comptime std.log.scoped(scope);
 }
 
-const Error = error{
+pub const Error = error{
     NoWebGpuInstance,
     NoWebGpuAdapter,
     NoWebGpuDevice,
     ImGuiInitFailure,
 };
 
+// ====================================================================================================================
+// GAME VTABLE
+
 pub fn GameTable(comptime Game: type) type {
     return struct {
-        // Config
-        step_time: Seconds,
-        max_step_delay: Seconds = 1.0,
+        step: fn (*Game, *App, StepContext) void,
+        draw: fn (*Game, *App, DrawContext) void,
 
-        // Methods
-        step: fn (*Game, *AppContext) void,
-        skipSteps: fn (*Game, *AppContext, usize) void,
-        draw: fn (*Game, *AppContext, *DrawContext) void,
-        onWindowOpening: fn (*Game, *AppContext, *WindowOpeningContext) void,
-        onGpuDeviceCreated: fn (*Game, *AppContext, *GpuDeviceCreatedContext) void,
-        onGpuDeviceLost: fn (*Game, *AppContext, *GpuDeviceLostContext) void,
-        onSwapChainCreated: fn (*Game, *AppContext, *SwapChainCreatedContext) void,
-        onSwapChainDestroyed: fn (*Game, *AppContext, *SwapChainDestroyedContext) void,
-        receiveCloseRequest: fn (*Game, *AppContext, CloseRequestArgs) void,
-        receiveFocusState: fn (*Game, *AppContext, FocusStateArgs) void,
-        receiveIconifyState: fn (*Game, *AppContext, IconifyStateArgs) void,
-        receiveKeyAction: fn (*Game, *AppContext, KeyActionArgs) void,
-        receiveCharInput: fn (*Game, *AppContext, CharInputArgs) void,
-        receiveMouseButtonAction: fn (*Game, *AppContext, MouseButtonActionArgs) void,
-        receiveMouseScroll: fn (*Game, *AppContext, MouseScrollArgs) void,
-        receiveCursorPosition: fn (*Game, *AppContext, CursorPositionArgs) void,
-        receiveCursorEntryState: fn (*Game, *AppContext, CursorEntryStateArgs) void,
-        receiveJoyState: fn (*Game, *AppContext, JoyStateArgs) void,
-        receiveDisplayState: fn (*Game, *AppContext, DisplayStateArgs) void,
-        receiveServerData: fn (*Game, *AppContext, ServerDataArgs) void,
+        handleSkippedSteps: fn (*Game, *App, SkippedStepsContext) void,
+        handleWindowOpen: fn (*Game, *App, WindowOpenContext) void,
+        handleCloseRequest: fn (*Game, *App, CloseRequestContext) void,
+        handleGpuDeviceCreation: fn (*Game, *App, GpuDeviceCreationContext) void,
+        handleGpuDeviceLoss: fn (*Game, *App, GpuDeviceLossContext) void,
+        handleSwapChainCreation: fn (*Game, *App, SwapChainCreationContext) void,
+        handleSwapChainDestruction: fn (*Game, *App, SwapChainDestructionContext) void,
+
+        receiveFocusState: fn (*Game, *App, FocusStateArgs) void,
+        receiveIconifyState: fn (*Game, *App, IconifyStateArgs) void,
+        receiveKeyAction: fn (*Game, *App, KeyActionArgs) void,
+        receiveCharInput: fn (*Game, *App, CharInputArgs) void,
+        receiveMouseButtonAction: fn (*Game, *App, MouseButtonActionArgs) void,
+        receiveMouseScroll: fn (*Game, *App, MouseScrollArgs) void,
+        receiveCursorPosition: fn (*Game, *App, CursorPositionArgs) void,
+        receiveCursorEntryState: fn (*Game, *App, CursorEntryStateArgs) void,
+        receiveJoyState: fn (*Game, *App, JoyStateArgs) void,
+        receiveDisplayState: fn (*Game, *App, DisplayStateArgs) void,
+        receiveServerData: fn (*Game, *App, ServerDataArgs) void,
     };
 }
 
-pub fn LoopbackServerTable(comptime LoopbackServer: type) type {
-    return struct {
-        // Methods
-        run: fn (*LoopbackServer, *LoopbackContext) void,
-    };
-}
+pub const StepContext = struct {};
 
-// ====================================================================================================================
-// EVENTS
+pub const DrawContext = struct {
+    device: gpu.Device,
+    framebuffer_view: gpu.TextureView,
+    framebuffer_format: gpu.TextureFormat = default_swap_chain_format,
+    framebuffer_size: Size,
+    step_remainder: u64,
+    estimated_fps: ?f64 = null,
 
-pub const WindowOpeningContext = struct {
-    displays: []const DisplayInfo,
-    title: [:0]const u8,
-    restored_size: Size,
-    maximized: bool,
+    pub fn newGuiFrame(ctx: DrawContext) void {
+        if (!use_imgui) return;
+
+        const size = ctx.framebuffer_size;
+        imgui.wgpu.newFrame();
+        imgui.glfw.newFrame();
+        gui.io.setDisplaySize(@floatFromInt(size.w), @floatFromInt(size.h));
+        gui.io.setDisplayFramebufferScale(1.0, 1.0);
+        gui.newFrame();
+    }
+
+    pub fn renderGui(ctx: DrawContext, encoder: gpu.CommandEncoder) void {
+        if (!use_imgui) return;
+
+        const color_attachments = [_]gpu.RenderPassColorAttachment{.{
+            .view = ctx.framebuffer_view,
+            .load_op = .load,
+            .store_op = .store,
+        }};
+        const descriptor = gpu.RenderPassDescriptor{
+            .color_attachment_count = color_attachments.len,
+            .color_attachments = &color_attachments,
+        };
+        const pass = encoder.beginRenderPass(descriptor);
+        defer pass.release();
+
+        gui.render();
+        imgui.wgpu.renderDrawData(gui.getDrawData(), pass);
+        pass.end();
+    }
 };
 
-pub const GpuDeviceCreatedContext = struct {
+pub const SkippedStepsContext = struct {
+    count: u64,
+};
+
+pub const WindowOpenContext = struct {
+    displays: []const DisplayInfo,
+};
+
+pub const CloseRequestContext = struct {};
+
+pub const GpuDeviceCreationContext = struct {
     device: gpu.Device,
     framebuffer_format: gpu.TextureFormat = default_swap_chain_format,
 };
 
-pub const GpuDeviceLostContext = struct {};
+pub const GpuDeviceLossContext = struct {};
 
-pub const SwapChainCreatedContext = struct {
+pub const SwapChainCreationContext = struct {
     device: gpu.Device,
     framebuffer_format: gpu.TextureFormat = default_swap_chain_format,
     framebuffer_size: Size,
 };
 
-pub const SwapChainDestroyedContext = struct {
+pub const SwapChainDestructionContext = struct {
     device: gpu.Device,
 };
-
-pub const CloseRequestArgs = void;
 
 pub const FocusStateArgs = struct {
     focused: bool,
@@ -188,7 +222,7 @@ pub const JoyStateArgs = struct {
 };
 
 pub const DisplayStateArgs = struct {
-    displays: []DisplayInfo,
+    displays: []const DisplayInfo,
 };
 
 pub const ServerDataArgs = struct {
@@ -197,36 +231,30 @@ pub const ServerDataArgs = struct {
 };
 
 // ====================================================================================================================
-// PUBLIC CONTEXT
+// PUBLIC INTERFACE
+
+pub const Config = struct {
+    step_time: u64,
+    max_step_delay: u64 = std.time.ns_per_s,
+};
+
+pub const WindowedMode = struct {
+    restored_size: ?Size = null,
+    maximized: ?bool = null,
+};
 
 pub const FullscreenMode = struct {
     monitor_location: ?Point = null,
-    is_exclusive: bool = false,
-};
-const ModeChangeKind = enum {
-    none,
-    toggle_fullscreen,
-    turn_fullscreen_on,
-    turn_fullscreen_off,
-};
-const ModeChange = union(ModeChangeKind) {
-    none: void,
-    toggle_fullscreen: FullscreenMode,
-    turn_fullscreen_on: FullscreenMode,
-    turn_fullscreen_off: void,
+    exclusive: ?bool = null,
 };
 
-pub const AppContext = struct {
-    const Self = @This();
-
+pub const App = struct {
     netcode_client: *netcode.Client,
     loopback: ?*LoopbackContext,
-
-    // Queued state
     should_close: bool = false,
-    queued_mode_change: ModeChange = .{ .none = {} },
+    window_changes: WindowChanges = .{},
 
-    pub fn connectToServer(self: *Self, connect_token: ?*[netcode.CONNECT_TOKEN_BYTES]u8) void {
+    pub fn connectToServer(self: *@This(), connect_token: ?*[netcode.CONNECT_TOKEN_BYTES]u8) void {
         if (connect_token) |token| {
             self.netcode_client.connect(token);
         } else {
@@ -237,7 +265,7 @@ pub const AppContext = struct {
         }
     }
 
-    pub fn disconnectFromServer(self: *Self) void {
+    pub fn disconnectFromServer(self: *@This()) void {
         if (self.netcode_client.loopback()) {
             if (self.loopback) |loopback| {
                 loopback.disconnectClient();
@@ -248,70 +276,44 @@ pub const AppContext = struct {
         }
     }
 
-    pub fn close(self: *Self) void {
+    pub fn close(self: *@This()) void {
         self.should_close = true;
     }
 
-    pub fn toggleFullscreen(self: *Self, fullscreen_mode: FullscreenMode) void {
-        self.queued_mode_change = .{ .toggle_fullscreen = fullscreen_mode };
+    pub fn setTitle(self: *@This(), comptime title: [:0]const u8) void {
+        self.window_changes.new_title = title;
     }
 
-    pub fn turnFullscreenOn(self: *Self, mode: FullscreenMode) void {
-        self.queued_mode_change = .{ .turn_fullscreen_on = mode };
-    }
-
-    pub fn turnFullscreenOff(self: *Self) void {
-        self.queued_mode_change = .{ .turn_fullscreen_off = {} };
-    }
-
-    fn dequeueModeChange(self: *Self) ModeChange {
-        const mode_change = self.queued_mode_change;
-        self.queued_mode_change = .{ .none = {} };
-        return mode_change;
-    }
-};
-
-pub const DrawContext = struct {
-    device: gpu.Device,
-    framebuffer_view: gpu.TextureView,
-    framebuffer_format: gpu.TextureFormat = default_swap_chain_format,
-    framebuffer_size: Size,
-    step_remainder: f64 = 0.0,
-    estimated_fps: ?f64 = null,
-
-    pub fn newGuiFrame(ctx: DrawContext) void {
-        if (!use_imgui) return;
-
-        const size = ctx.framebuffer_size;
-        imgui.wgpu.newFrame();
-        imgui.glfw.newFrame();
-        gui.io.setDisplaySize(@floatFromInt(size.w), @floatFromInt(size.h));
-        gui.io.setDisplayFramebufferScale(1.0, 1.0);
-        gui.newFrame();
-    }
-
-    pub fn renderGui(ctx: DrawContext, encoder: gpu.CommandEncoder) void {
-        if (!use_imgui) return;
-
-        const color_attachments = [_]gpu.RenderPassColorAttachment{.{
-            .view = ctx.framebuffer_view,
-            .load_op = .load,
-            .store_op = .store,
-        }};
-        const descriptor = gpu.RenderPassDescriptor{
-            .color_attachment_count = color_attachments.len,
-            .color_attachments = &color_attachments,
+    pub fn setWindowed(self: *@This(), mode: WindowedMode) void {
+        self.window_changes.mode_change = .{
+            .kind = .set_windowed,
+            .windowed = mode,
         };
-        const pass = encoder.beginRenderPass(descriptor);
-        defer pass.release();
+    }
 
-        gui.render();
-        imgui.wgpu.renderDrawData(gui.getDrawData(), pass);
-        pass.end();
+    pub fn setFullscreen(self: *@This(), mode: FullscreenMode) void {
+        self.window_changes.mode_change = .{
+            .kind = .set_fullscreen,
+            .fullscreen = mode,
+        };
+    }
+
+    pub fn toggleFullscreen(self: *@This(), windowed_mode: WindowedMode, fullscreen_mode: FullscreenMode) void {
+        self.window_changes.mode_change = .{
+            .kind = .toggle_fullscreen,
+            .windowed = windowed_mode,
+            .fullscreen = fullscreen_mode,
+        };
+    }
+
+    fn dequeueWindowChanges(self: *@This()) WindowChanges {
+        const window_changes = self.window_changes;
+        self.window_changes = .{};
+        return window_changes;
     }
 };
 
-pub const Packet = struct {
+pub const LoopbackPacket = struct {
     data: []u8,
     sequence: u64,
 };
@@ -322,32 +324,34 @@ pub const LoopbackContext = struct {
 
     client_active: bool = true,
     client_connected: bool = false,
-    incoming_packets: RingBuffer(MAX_INCOMING_PACKETS, Packet) = .{},
-    incoming_packet_buffer: [MAX_INCOMING_PACKETS][netcode.MAX_PACKET_SIZE]u8 = [_][netcode.MAX_PACKET_SIZE]u8{[_]u8{0} ** netcode.MAX_PACKET_SIZE} ** MAX_INCOMING_PACKETS,
-    outgoing_packets: RingBuffer(MAX_OUTGOING_PACKETS, Packet) = .{},
-    outgoing_packet_buffer: [MAX_OUTGOING_PACKETS][netcode.MAX_PACKET_SIZE]u8 = [_][netcode.MAX_PACKET_SIZE]u8{[_]u8{0} ** netcode.MAX_PACKET_SIZE} ** MAX_OUTGOING_PACKETS,
+    incoming_packets: RingBuffer(MAX_INCOMING_PACKETS, LoopbackPacket) = .{},
+    incoming_packet_buffer: [MAX_INCOMING_PACKETS][netcode.MAX_PACKET_SIZE]u8 =
+        [_][netcode.MAX_PACKET_SIZE]u8{[_]u8{0} ** netcode.MAX_PACKET_SIZE} ** MAX_INCOMING_PACKETS,
+    outgoing_packets: RingBuffer(MAX_OUTGOING_PACKETS, LoopbackPacket) = .{},
+    outgoing_packet_buffer: [MAX_OUTGOING_PACKETS][netcode.MAX_PACKET_SIZE]u8 =
+        [_][netcode.MAX_PACKET_SIZE]u8{[_]u8{0} ** netcode.MAX_PACKET_SIZE} ** MAX_OUTGOING_PACKETS,
     outgoing_packet_sequence: u64 = 0,
 
-    pub fn clientActive(self: *LoopbackContext) bool {
+    pub fn clientActive(self: *@This()) bool {
         return self.client_active;
     }
 
-    pub fn clientConnected(self: *LoopbackContext) bool {
+    pub fn clientConnected(self: *@This()) bool {
         return self.client_connected;
     }
 
-    pub fn sendPacket(self: *LoopbackContext, packet_data: []u8) void {
+    pub fn sendPacket(self: *@This(), packet_data: []u8) void {
         const len = @max(packet_data.len, netcode.MAX_PACKET_SIZE);
         var new_packet_data = self.outgoing_packet_buffer[self.outgoing_packets.head][0..len];
         std.mem.copy(u8, new_packet_data, packet_data);
-        self.outgoing_packets.write(Packet{
+        self.outgoing_packets.write(LoopbackPacket{
             .data = new_packet_data,
             .sequence = self.outgoing_packet_sequence,
         });
         self.outgoing_packet_sequence += 1;
     }
 
-    pub fn receivePacket(self: *LoopbackContext) ?Packet {
+    pub fn receivePacket(self: *@This()) ?LoopbackPacket {
         // Release previous read first, if needed
         // We invert the read and release so the library user doesn't need to call a "freePacket" sort of method
         // This approach is organic in a standard `while (ctx.receivePacket()) |packet|` loop
@@ -355,25 +359,25 @@ pub const LoopbackContext = struct {
         return self.incoming_packets.readWithoutRelease();
     }
 
-    fn connectClient(self: *LoopbackContext) void {
+    fn connectClient(self: *@This()) void {
         self.client_connected = true;
     }
 
-    fn disconnectClient(self: *LoopbackContext) void {
+    fn disconnectClient(self: *@This()) void {
         self.client_connected = false;
     }
 
-    fn sendPacketToServer(self: *LoopbackContext, packet_data: []u8, packet_sequence: u64) void {
+    fn sendPacketToServer(self: *@This(), packet_data: []u8, packet_sequence: u64) void {
         const len = @max(packet_data.len, netcode.MAX_PACKET_SIZE);
         var new_packet_data = self.incoming_packet_buffer[self.incoming_packets.head][0..len];
         std.mem.copy(u8, new_packet_data, packet_data);
-        self.incoming_packets.write(Packet{
+        self.incoming_packets.write(LoopbackPacket{
             .data = new_packet_data,
             .sequence = packet_sequence,
         });
     }
 
-    fn processPacketsFromServer(self: *LoopbackContext, client: *netcode.Client) void {
+    fn processPacketsFromServer(self: *@This(), client: *netcode.Client) void {
         // netcode_process_loopback_packet will memcpy the packet, after which we free the memory
         while (self.outgoing_packets.readWithoutRelease()) |packet| {
             defer self.outgoing_packets.releasePreviousRead();
@@ -383,29 +387,27 @@ pub const LoopbackContext = struct {
 
     fn sendLoopbackPacketCallback(context: ?*anyopaque, _: c_int, packet_data: [*c]u8, packet_bytes: c_int, packet_sequence: u64) callconv(.C) void {
         if (context) |ctx| {
-            const loopback: *LoopbackContext = @ptrCast(@alignCast(ctx));
+            const loopback: *@This() = @ptrCast(@alignCast(ctx));
             loopback.sendPacketToServer(packet_data[0..@intCast(packet_bytes)], packet_sequence);
         }
     }
 };
 
-// ====================================================================================================================
-// INTERNAL CORE
-
 pub fn runLoopback(
     comptime Game: type,
     comptime game_table: GameTable(Game),
+    comptime config: Config,
     game: *Game,
     comptime LoopbackServer: type,
-    comptime loopback_server_table: LoopbackServerTable(LoopbackServer),
+    comptime loopback_server_run: fn (*LoopbackServer, *LoopbackContext) void,
     loopback_server: *LoopbackServer,
     allocator: Allocator,
 ) !void {
     var loopback = LoopbackContext{};
-    const server_thread = try std.Thread.spawn(.{}, loopback_server_table.run, .{ loopback_server, &loopback });
+    const server_thread = try std.Thread.spawn(.{}, loopback_server_run, .{ loopback_server, &loopback });
     defer server_thread.join();
 
-    try runInternal(Game, game_table, game, allocator, &loopback);
+    try runInternal(Game, game_table, config, game, allocator, &loopback);
 
     loopback.client_active = false;
 }
@@ -413,20 +415,24 @@ pub fn runLoopback(
 pub fn run(
     comptime Game: type,
     comptime game_table: GameTable(Game),
+    comptime config: Config,
     game: *Game,
     allocator: Allocator,
 ) !void {
-    try runInternal(Game, game_table, game, allocator, null);
+    try runInternal(Game, game_table, config, game, allocator, null);
 }
+
+// ====================================================================================================================
+// INTERNAL CORE
 
 fn runInternal(
     comptime Game: type,
     comptime game_table: GameTable(Game),
+    comptime config: Config,
     game: *Game,
     allocator: Allocator,
     loopback: ?*LoopbackContext,
 ) !void {
-    // =========================================================================
     try netcode.init();
     defer netcode.term();
 
@@ -439,7 +445,7 @@ fn runInternal(
 
     // =========================================================================
 
-    var app_context = AppContext{
+    var app = App{
         .netcode_client = netcode_client,
         .loopback = loopback,
     };
@@ -453,51 +459,36 @@ fn runInternal(
     try glfw.init();
     defer glfw.terminate();
 
-    // Populate array of displays
-    const monitors = try Monitor.getAll();
-    var display_buffer: [DISPLAY_MAX]DisplayInfo = undefined;
-    const display_count = @min(monitors.len, DISPLAY_MAX);
-    for (monitors, 0..display_count) |monitor, i| {
-        display_buffer[i] = try getDisplayInfo(monitor.?);
-    }
+    var displays = try DisplayArray.create();
+    game_table.handleWindowOpen(game, &app, .{ .displays = displays.slice() });
+    const window_changes = app.dequeueWindowChanges();
+    const title = window_changes.new_title orelse "auxo game";
+    const maximized = window_changes.mode_change.windowed.maximized orelse false;
+    const restored_size = window_changes.mode_change.windowed.restored_size orelse Size{ .w = 640, .h = 360 };
 
-    var window_opening = WindowOpeningContext{
-        .displays = display_buffer[0..display_count],
-        .title = "auxo game",
-        .restored_size = .{ .w = 640, .h = 360 },
-        .maximized = false,
-    };
-    game_table.onWindowOpening(game, &app_context, &window_opening);
-
-    glfw.hintWindowMaximized(window_opening.maximized);
     glfw.hintWindowVisible(false);
-    var window = try Window.create(window_opening.restored_size, window_opening.title, null, null);
+    glfw.hintWindowMaximized(maximized);
+    var window = try Window.create(restored_size, title, null, null);
     defer window.destroy();
 
-    var app = App{
+    var framebuffer_size = AtomicSize.create(try window.getFramebufferSize());
+    var event_buffer = EventBuffer{};
+    var window_wrapper = WindowWrapper{
         .window = window,
+        .framebuffer_size = &framebuffer_size,
+        .event_writer = .{ .buffer = &event_buffer },
         .restored_pos = window.getPos() catch Point.zero,
-        .restored_size = window_opening.restored_size,
-        .was_maximized = window_opening.maximized,
+        .restored_size = restored_size,
+        .was_maximized = maximized,
     };
-    const mode_change = app_context.dequeueModeChange();
-    try app.changeMode(mode_change);
+    try window_wrapper.init(window_changes.mode_change);
 
-    var engine: Engine(Game, game_table) = .{
-        .app = &app,
-        .app_context = &app_context,
-        .world_timer = try Timer.start(),
-    };
-
-    // Hook Auxo callbacks first...
-    try engine.hookWindow(window);
-
-    // ...then ImGui callbacks
+    // Hook ImGui callbacks in-between hooking Auxo callbacks and showing window
     if (use_imgui) {
         if (imgui.glfw.initForOther(window, true)) {
-            Logger(.imgui).info("ImGui GLFW backend Initialization successful.", .{});
+            Logger(.imgui).info("ImGui GLFW backend initialization successful.", .{});
         } else {
-            Logger(.imgui).err("ImGui GLFW backend Initialization failed.", .{});
+            Logger(.imgui).err("ImGui GLFW backend initialization failed.", .{});
             return Error.ImGuiInitFailure;
         }
     }
@@ -520,47 +511,228 @@ fn runInternal(
 
     // =========================================================================
 
+    var engine = Engine(Game, game_table){
+        .config = config,
+        .game = game,
+        .app = &app,
+        .world_timer = try Timer.start(),
+        .event_reader = .{ .buffer = &event_buffer },
+    };
     var event_loop_state = .{
-        .display_buffer = display_buffer,
-        .display_count = display_count,
+        .window = &window_wrapper,
+        .displays = &displays,
     };
     var render_loop_state = .{
         .instance = instance,
         .surface = surface,
+        .framebuffer_size = &framebuffer_size,
     };
-    try engine.eventLoop(game, &event_loop_state, &render_loop_state);
+    try engine.eventLoop(&event_loop_state, &render_loop_state);
 }
 
-const App = struct {
-    const Self = @This();
+// TODO: optionize event buffer capacity
+const EventBuffer = RingBuffer(64, EventArgs);
 
+const EventWriter = struct {
+    buffer: *EventBuffer,
+
+    pub fn write(self: EventWriter, args: EventArgs) void {
+        self.buffer.write(args);
+    }
+};
+
+const EventReader = struct {
+    buffer: *EventBuffer,
+
+    pub fn read(self: EventReader) ?EventArgs {
+        return self.buffer.read();
+    }
+};
+
+const EventKind = enum {
+    close_request,
+    focus_state,
+    iconify_state,
+    key_action,
+    char_input,
+    mouse_button_action,
+    mouse_scroll,
+    cursor_position,
+    cursor_entry_state,
+};
+const EventArgs = union(EventKind) {
+    close_request: CloseRequestContext,
+    focus_state: FocusStateArgs,
+    iconify_state: IconifyStateArgs,
+    key_action: KeyActionArgs,
+    char_input: CharInputArgs,
+    mouse_button_action: MouseButtonActionArgs,
+    mouse_scroll: MouseScrollArgs,
+    cursor_position: CursorPositionArgs,
+    cursor_entry_state: CursorEntryStateArgs,
+};
+
+const AtomicSize = struct {
+    wh: u64 = 0,
+
+    pub fn create(size: Size) AtomicSize {
+        return .{ .wh = pack(size) };
+    }
+
+    pub fn store(self: *AtomicSize, size: Size) void {
+        @atomicStore(u64, &self.wh, pack(size), .SeqCst);
+    }
+
+    pub fn load(self: *AtomicSize) Size {
+        return unpack(@atomicLoad(u64, &self.wh, .SeqCst));
+    }
+
+    fn pack(size: Size) u64 {
+        const w = @as(u64, @intCast(size.w)) << 32;
+        const h = size.h;
+        return w | h;
+    }
+
+    fn unpack(wh: u64) Size {
+        return .{
+            .w = @intCast(wh >> 32),
+            .h = @intCast(wh & std.math.maxInt(u31)),
+        };
+    }
+};
+
+const ModeChange = struct {
+    kind: enum {
+        none,
+        set_windowed,
+        set_fullscreen,
+        toggle_fullscreen,
+    },
+    windowed: WindowedMode = .{},
+    fullscreen: FullscreenMode = .{},
+};
+
+const WindowChanges = struct {
+    new_title: ?[:0]const u8 = null,
+    mode_change: ModeChange = .{ .kind = .none },
+};
+
+const WindowWrapper = struct {
     window: *Window,
-
-    // Cached state
+    event_writer: EventWriter,
+    framebuffer_size: *AtomicSize,
     restored_pos: Point,
     restored_size: Size,
     was_maximized: bool,
     fake_fullscreen_on: if (os == .windows) bool else void = if (os == .windows) false else {},
 
-    fn onPos(self: *Self, pos: Point) void {
+    pub fn init(self: *@This(), initial_mode: ModeChange) !void {
+        try self.changeMode(initial_mode);
+
+        var win = self.window;
+        const W = @This();
+        win.setUserPointer(W, self);
+        win.setPosCallback(W, onPos);
+        win.setSizeCallback(W, onSize);
+        win.setFramebufferSizeCallback(W, onFramebufferSize);
+        win.setCloseCallback(W, onClose);
+        win.setFocusCallback(W, onFocus);
+        win.setIconifyCallback(W, onIconify);
+        win.setMaximizeCallback(W, onMaximize);
+        win.setCursorEnterCallback(W, onCursorEnter);
+        win.setKeyCallback(W, onKey);
+        win.setCharCallback(W, onChar);
+        win.setMouseButtonCallback(W, onMouseButton);
+        win.setCursorPosCallback(W, onCursorPos);
+        win.setScrollCallback(W, onScroll);
+
+        // Now that we've hooked the framebuffer callback, we can init this cleanly
+        const size = try self.window.getFramebufferSize();
+        self.framebuffer_size.store(size);
+    }
+
+    pub fn processChanges(self: *@This(), changes: WindowChanges) !void {
+        if (changes.new_title) |title| {
+            self.window.setTitle(title);
+        }
+
+        try self.changeMode(changes.mode_change);
+    }
+
+    fn onPos(self: *@This(), pos: Point) void {
         if (self.shouldCacheRestoredBounds()) {
             self.restored_pos = pos;
         }
     }
 
-    fn onSize(self: *Self, size: Size) void {
+    fn onSize(self: *@This(), size: Size) void {
         if (size.w > 0 and size.h > 0 and self.shouldCacheRestoredBounds()) {
             self.restored_size = size;
         }
     }
 
-    fn onMaximize(self: *Self, value: bool) void {
+    fn onFramebufferSize(self: *@This(), size: Size) void {
+        self.framebuffer_size.store(size);
+    }
+
+    fn onClose(self: *@This()) void {
+        self.event_writer.write(.{ .close_request = .{} });
+    }
+
+    fn onFocus(self: *@This(), focused: bool) void {
+        self.event_writer.write(.{ .focus_state = .{ .focused = focused } });
+    }
+
+    fn onIconify(self: *@This(), iconified: bool) void {
+        self.event_writer.write(.{ .iconify_state = .{ .iconified = iconified } });
+    }
+
+    fn onMaximize(self: *@This(), value: bool) void {
         if (os != .windows or !self.fake_fullscreen_on) {
             self.was_maximized = value;
         }
     }
 
-    fn shouldCacheRestoredBounds(self: *Self) bool {
+    fn onKey(self: *@This(), key: Key, scancode: i32, action: KeyAction, mods: KeyMods) void {
+        self.event_writer.write(.{ .key_action = .{
+            .key = key,
+            .scancode = scancode,
+            .action = action,
+            .mods = mods,
+        } });
+    }
+
+    fn onChar(self: *@This(), codepoint: u21) void {
+        self.event_writer.write(.{ .char_input = .{ .codepoint = codepoint } });
+    }
+
+    fn onMouseButton(self: *@This(), button: MouseButton, action: MouseButtonAction, mods: KeyMods) void {
+        self.event_writer.write(.{ .mouse_button_action = .{
+            .button = button,
+            .action = action,
+            .mods = mods,
+        } });
+    }
+
+    fn onCursorPos(self: *@This(), x: f64, y: f64) void {
+        self.event_writer.write(.{ .cursor_position = .{
+            .x = x,
+            .y = y,
+        } });
+    }
+
+    fn onCursorEnter(self: *@This(), entered: bool) void {
+        self.event_writer.write(.{ .cursor_entry_state = .{ .entered = entered } });
+    }
+
+    fn onScroll(self: *@This(), x_offset: f64, y_offset: f64) void {
+        self.event_writer.write(.{ .mouse_scroll = .{
+            .x_offset = x_offset,
+            .y_offset = y_offset,
+        } });
+    }
+
+    fn shouldCacheRestoredBounds(self: @This()) bool {
         // Don't cache if fake fullscreen
         if (os == .windows and self.fake_fullscreen_on) return false;
 
@@ -576,50 +748,108 @@ const App = struct {
         return true;
     }
 
-    fn changeMode(self: *Self, mode_change: ModeChange) glfw.Error!void {
-        switch (mode_change) {
+    fn changeMode(self: *@This(), mode_change: ModeChange) glfw.Error!void {
+        if (self.window.getFullscreenMonitor()) |_| {
+            try self.changeRealFullscreen(mode_change);
+        } else if (os == .windows and self.fake_fullscreen_on) {
+            try self.changeFakeFullscreen(mode_change);
+        } else {
+            try self.changeWindowed(mode_change);
+        }
+    }
+
+    fn changeWindowed(self: *@This(), mode_change: ModeChange) !void {
+        switch (mode_change.kind) {
             .none => return,
-            .toggle_fullscreen => |mode| {
-                if (self.window.getFullscreenMonitor()) |_| {
-                    self.turnRealFullscreenToWindowed();
-                } else if (os == .windows and self.fake_fullscreen_on) {
-                    self.turnFakeFullscreenToWindowed();
-                } else {
-                    const monitor = try findMonitorMatch(mode.monitor_location, self.window);
-                    if (os == .windows and !mode.is_exclusive) {
-                        try self.turnCompositedToFakeFullscreen(monitor);
+            .set_windowed => {
+                const mode = mode_change.windowed;
+                // 1) Are we toggling maximized state? Then resolve here.
+                if (mode.maximized) |maximize| {
+                    if (self.was_maximized and !maximize) {
+                        self.window.restore();
+                        if (mode.restored_size) |size| self.window.setSize(size);
+                        return;
+                    } else if (!self.was_maximized and maximize) {
+                        if (mode.restored_size) |size| self.window.setSize(size);
+                        self.window.maximize();
+                        return;
+                    } // else fallthrough
+                }
+                // 2) Otherwise, are we changing restored size? Then resolve here.
+                if (mode.restored_size) |size| {
+                    if (self.was_maximized) {
+                        // Temporarily restore window just to set new size (silly, but a corner case)
+                        self.window.restore();
+                        self.window.setSize(size);
+                        self.window.maximize();
                     } else {
-                        const vm = try monitor.getVideoMode();
-                        self.window.setFullscreen(monitor, Size.abs(vm.width, vm.height), vm.refreshRate);
+                        self.window.setSize(size);
                     }
                 }
             },
-            .turn_fullscreen_on => |mode| {
+            .set_fullscreen, .toggle_fullscreen => {
+                const mode = mode_change.fullscreen;
                 const monitor = try findMonitorMatch(mode.monitor_location, self.window);
-                if (os == .windows and !mode.is_exclusive) {
-                    if (self.window.getFullscreenMonitor()) |_| {
-                        self.turnRealFullscreenToWindowed();
-                    }
+                const exclusive = mode.exclusive orelse false;
+                if (os == .windows and !exclusive) {
                     try self.turnCompositedToFakeFullscreen(monitor);
                 } else {
-                    if (os == .windows and self.fake_fullscreen_on) {
-                        self.turnFakeFullscreenToWindowed();
-                    }
                     const vm = try monitor.getVideoMode();
                     self.window.setFullscreen(monitor, Size.abs(vm.width, vm.height), vm.refreshRate);
                 }
             },
-            .turn_fullscreen_off => {
-                if (self.window.getFullscreenMonitor()) |_| {
+        }
+    }
+
+    fn changeRealFullscreen(self: *@This(), mode_change: ModeChange) !void {
+        switch (mode_change.kind) {
+            .none => return,
+            .set_windowed, .toggle_fullscreen => {
+                const mode = mode_change.windowed;
+                if (mode.restored_size) |size| self.restored_size = size;
+                if (mode.maximized) |maximize| self.was_maximized = maximize;
+                self.turnRealFullscreenToWindowed();
+            },
+            .set_fullscreen => {
+                const mode = mode_change.fullscreen;
+                const monitor = try findMonitorMatch(mode.monitor_location, self.window);
+                const exclusive = mode.exclusive orelse false;
+                if (os == .windows and !exclusive) {
                     self.turnRealFullscreenToWindowed();
-                } else if (os == .windows and self.fake_fullscreen_on) {
-                    self.turnFakeFullscreenToWindowed();
-                } // else nothing needed
+                    try self.turnCompositedToFakeFullscreen(monitor);
+                } else {
+                    const vm = try monitor.getVideoMode();
+                    self.window.setFullscreen(monitor, Size.abs(vm.width, vm.height), vm.refreshRate);
+                }
             },
         }
     }
 
-    fn turnCompositedToFakeFullscreen(self: *Self, monitor: *Monitor) !void {
+    fn changeFakeFullscreen(self: *@This(), mode_change: ModeChange) !void {
+        switch (mode_change.kind) {
+            .none => return,
+            .set_windowed, .toggle_fullscreen => {
+                const mode = mode_change.windowed;
+                if (mode.restored_size) |size| self.restored_size = size;
+                if (mode.maximized) |maximize| self.was_maximized = maximize;
+                self.turnFakeFullscreenToWindowed();
+            },
+            .set_fullscreen => {
+                const mode = mode_change.fullscreen;
+                const monitor = try findMonitorMatch(mode.monitor_location, self.window);
+                const exclusive = mode.exclusive orelse false;
+                if (os == .windows and !exclusive) {
+                    try self.turnCompositedToFakeFullscreen(monitor);
+                } else {
+                    self.turnFakeFullscreenToWindowed();
+                    const vm = try monitor.getVideoMode();
+                    self.window.setFullscreen(monitor, Size.abs(vm.width, vm.height), vm.refreshRate);
+                }
+            },
+        }
+    }
+
+    fn turnCompositedToFakeFullscreen(self: *@This(), monitor: *Monitor) !void {
         const pos = try monitor.getPos();
         const vm = try monitor.getVideoMode();
         const size = Size.abs(vm.width, vm.height);
@@ -628,10 +858,10 @@ const App = struct {
         if (self.isFakeFullscreenWithBounds(pos, size)) return;
 
         // We must first restore the window to deal with two cases:
-        // 1. Win32 can't properly mutate a maximized window (this could later lead to a maximized window that doesn't cover the screen).
-        // 2. We can't re-dock a "pane" (an unrestored, unmaximized window docked on the side of a monitor), so we don't want to cache its docked pos or size.
-        // To properly deal with the first case, we have to manually cache the window's maximized state.
-        self.restore();
+        // 1) Win32 can't properly mutate a maximized window (this could later lead to a maximized window that doesn't cover the screen).
+        // 2) We can't re-dock a "pane" (an unrestored, unmaximized window docked on the side of a monitor), so we don't want to cache its docked pos or size.
+        // To properly deal with the first case, we have to preserve the window's maximized state.
+        self.restorePreservingMaximizedState();
 
         self.fake_fullscreen_on = true;
         self.window.hide();
@@ -641,7 +871,7 @@ const App = struct {
         self.window.show();
     }
 
-    fn turnFakeFullscreenToWindowed(self: *Self) void {
+    fn turnFakeFullscreenToWindowed(self: *@This()) void {
         self.window.hide();
         self.window.setSize(self.restored_size);
         self.window.setPos(self.restored_pos);
@@ -649,18 +879,18 @@ const App = struct {
         self.window.show();
         self.fake_fullscreen_on = false;
 
-        self.restore();
+        self.restorePreservingMaximizedState();
         if (self.was_maximized) self.window.maximize();
     }
 
-    fn turnRealFullscreenToWindowed(self: *Self) void {
+    fn turnRealFullscreenToWindowed(self: *@This()) void {
         self.window.setWindowed(self.restored_pos, self.restored_size);
 
-        self.restore();
+        self.restorePreservingMaximizedState();
         if (self.was_maximized) self.window.maximize();
     }
 
-    fn isFakeFullscreenWithBounds(self: *Self, pos: Point, size: Size) bool {
+    fn isFakeFullscreenWithBounds(self: *@This(), pos: Point, size: Size) bool {
         if (!self.fake_fullscreen_on) return false;
 
         const wpos = self.window.getPos() catch return false;
@@ -672,7 +902,7 @@ const App = struct {
         return true;
     }
 
-    fn restore(self: *Self) void {
+    fn restorePreservingMaximizedState(self: *@This()) void {
         const wm = self.was_maximized;
         self.window.restore();
         self.was_maximized = wm;
@@ -680,71 +910,34 @@ const App = struct {
 };
 
 const EventLoopState = struct {
-    display_buffer: [DISPLAY_MAX]DisplayInfo,
-    display_count: usize = 0,
+    window: *WindowWrapper,
+    displays: *DisplayArray,
 };
 
 const RenderLoopState = struct {
     instance: gpu.Instance,
     surface: gpu.Surface,
+    framebuffer_size: *AtomicSize,
 };
 
 fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
     return struct {
-        const Self = @This();
-
+        config: Config,
+        game: *Game,
         app: *App,
-        app_context: *AppContext,
-        framebuffer_wh: u64 = 0,
+        event_reader: EventReader,
         world_timer: Timer,
         world_timestamp: u64 = 0,
         game_lock: Mutex = .{},
-        events: RingBuffer(64, EventArgs) = .{},
 
-        const ticks_per_step: usize = @intFromFloat(table.step_time * std.time.ns_per_s);
-        const max_steps_per_update: usize = @intFromFloat(table.max_step_delay / table.step_time);
-
-        fn packSize(size: Size) u64 {
-            const w = @as(u64, @intCast(size.w)) << 32;
-            const h = size.h;
-            return w | h;
-        }
-        fn unpackSize(wh: u64) Size {
-            return .{
-                .w = @intCast(wh >> 32),
-                .h = @intCast(wh & std.math.maxInt(u31)),
-            };
-        }
-
-        fn hookWindow(self: *Self, win: *Window) !void {
-            win.setUserPointer(Self, self);
-            win.setPosCallback(Self, onPos);
-            win.setSizeCallback(Self, onSize);
-            win.setFramebufferSizeCallback(Self, onFramebufferSize);
-            win.setCloseCallback(Self, onClose);
-            win.setFocusCallback(Self, onFocus);
-            win.setIconifyCallback(Self, onIconify);
-            win.setMaximizeCallback(Self, onMaximize);
-            win.setCursorEnterCallback(Self, onCursorEnter);
-            win.setKeyCallback(Self, onKey);
-            win.setCharCallback(Self, onChar);
-            win.setMouseButtonCallback(Self, onMouseButton);
-            win.setCursorPosCallback(Self, onCursorPos);
-            win.setScrollCallback(Self, onScroll);
-
-            // Now that we've hooked the framebuffer callback, we can init this cleanly
-            const size = try win.getFramebufferSize();
-            self.framebuffer_wh = packSize(size);
-        }
-
-        fn eventLoop(self: *Self, game: *Game, state: *EventLoopState, render_loop_state: *RenderLoopState) !void {
-            self.world_timer.reset();
+        fn eventLoop(self: *@This(), state: *EventLoopState, render_loop_state: *RenderLoopState) !void {
+            const game = self.game;
+            const app = self.app;
 
             var event_loop_broken = false;
             var render_loop_aborted = false;
             const render_thread = try std.Thread.spawn(.{}, renderLoop, .{
                 self,
-                game,
                 render_loop_state,
                 &event_loop_broken,
                 &render_loop_aborted,
@@ -758,47 +951,49 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
             for (joysticks, 0..) |_, i| joysticks[i].init(i);
 
             // Swallow GLFW errors inside loop and rely on GLFW error callback for logging
-            while (!self.app_context.should_close and !render_loop_aborted) {
-                var displays = state.display_buffer[0..state.display_count];
-                const display_state_changed = displaysChanged(&displays, &state.display_buffer) catch true;
+            while (!app.should_close and !render_loop_aborted) {
+                const display_state_changed = state.displays.stateChanged() catch true;
 
                 var joy_states_changed = [_]bool{false} ** glfw.JOYSTICK_COUNT;
                 for (joysticks, 0..) |_, i| joy_states_changed[i] = joysticks[i].stateChanged() catch false;
 
-                var mode_change: ModeChange = undefined;
+                var window_changes: WindowChanges = undefined;
 
                 {
                     self.game_lock.lock();
                     defer self.game_lock.unlock();
 
                     if (display_state_changed) {
-                        table.receiveDisplayState(game, self.app_context, .{ .displays = displays });
+                        table.receiveDisplayState(game, app, .{ .displays = state.displays.slice() });
                     }
 
                     for (joy_states_changed, 0..) |changed, i| {
                         if (changed) {
-                            table.receiveJoyState(game, self.app_context, joysticks[i].getStateArgs());
+                            table.receiveJoyState(game, app, joysticks[i].getStateArgs());
                         }
                     }
 
-                    self.update(game);
+                    self.update();
 
-                    mode_change = self.app_context.dequeueModeChange();
+                    window_changes = app.dequeueWindowChanges();
                 }
 
-                self.app.changeMode(mode_change) catch {};
+                state.window.processChanges(window_changes) catch {};
                 glfw.waitEventsTimeout(0.5);
             }
         }
 
-        fn renderLoop(self: *Self, game: *Game, state: *RenderLoopState, event_loop_broken: *const bool, render_loop_aborted: *bool) !void {
-            self.renderLoopInner(game, state, event_loop_broken) catch |err| {
+        fn renderLoop(self: *@This(), state: *RenderLoopState, event_loop_broken: *const bool, render_loop_aborted: *bool) !void {
+            self.renderLoopInner(state, event_loop_broken) catch |err| {
                 render_loop_aborted.* = true;
                 return err;
             };
         }
 
-        fn renderLoopInner(self: *Self, game: *Game, state: *RenderLoopState, event_loop_broken: *const bool) !void {
+        fn renderLoopInner(self: *@This(), state: *RenderLoopState, event_loop_broken: *const bool) !void {
+            const game = self.game;
+            const app = self.app;
+
             var frame_tracker: FrameTracker(60, 240) = .{ .timer = try Timer.start() };
 
             var device_lost = false;
@@ -806,8 +1001,7 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
             var device_created = true;
             defer releaseDevice(device);
 
-            var old_wh = @atomicLoad(u64, &self.framebuffer_wh, .SeqCst);
-            const old_size = unpackSize(old_wh);
+            var old_size = state.framebuffer_size.load();
             var swap_chain = createSwapChain(device, state.surface, old_size.w, old_size.h);
             var swap_chain_created = true;
             defer swap_chain.release();
@@ -822,10 +1016,9 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                         defer self.game_lock.unlock();
 
                         // Run an update first since this is an exceptional event and may take time to resolve.
-                        self.update(game);
-                        var ctx = .{};
-                        table.onGpuDeviceLost(game, self.app_context, &ctx);
-                        if (self.app_context.should_close) {
+                        self.update();
+                        table.handleGpuDeviceLoss(game, app, .{});
+                        if (app.should_close) {
                             return error.Unknown;
                         }
                     }
@@ -840,18 +1033,16 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                     defer self.game_lock.unlock();
 
                     // Run an update first since this is an exceptional event and may take time to resolve.
-                    self.update(game);
-                    var ctx = .{ .device = device };
-                    table.onGpuDeviceCreated(game, self.app_context, &ctx);
+                    self.update();
+                    table.handleGpuDeviceCreation(game, app, .{ .device = device });
                     device_created = false;
                 }
 
                 // 3) If any relevant state has changed, report swap-chain destruction to user, then re-create it.
-                const wh = @atomicLoad(u64, &self.framebuffer_wh, .SeqCst);
-                const size = unpackSize(wh);
-                const size_changed = old_wh != wh;
-                if (wh == 0) continue;
-                old_wh = wh;
+                const size = state.framebuffer_size.load();
+                const size_changed = size.w != old_size.w or size.h != old_size.h;
+                if (size.w == 0 and size.h == 0) continue;
+                old_size = size;
                 if (device_changed or size_changed) {
                     frame_tracker.reset();
                     swap_chain.release();
@@ -859,8 +1050,7 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                         self.game_lock.lock();
                         defer self.game_lock.unlock();
 
-                        var ctx = .{ .device = device };
-                        table.onSwapChainDestroyed(game, self.app_context, &ctx);
+                        table.handleSwapChainDestruction(game, app, .{ .device = device });
                     }
                     swap_chain = createSwapChain(device, state.surface, size.w, size.h);
                     swap_chain_created = true;
@@ -874,8 +1064,7 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                     self.game_lock.lock();
                     defer self.game_lock.unlock();
 
-                    var ctx = .{ .device = device, .framebuffer_size = size };
-                    table.onSwapChainCreated(game, self.app_context, &ctx);
+                    table.handleSwapChainCreation(game, app, .{ .device = device, .framebuffer_size = size });
                     swap_chain_created = false;
                 }
 
@@ -884,18 +1073,16 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
                     self.game_lock.lock();
                     defer self.game_lock.unlock();
 
-                    self.update(game);
+                    self.update();
 
-                    // Read world timer immediately before draw.
-                    const delta_ticks = self.world_timer.read() - self.world_timestamp;
-                    var ctx = .{
+                    var world_delta = self.world_timer.read() - self.world_timestamp;
+                    table.draw(game, app, .{
                         .device = device,
                         .framebuffer_view = view,
                         .framebuffer_size = size,
-                        .step_remainder = @as(f64, @floatFromInt(delta_ticks)) / @as(f64, @floatFromInt(ticks_per_step)),
+                        .step_remainder = world_delta,
                         .estimated_fps = estimated_fps,
-                    };
-                    table.draw(game, self.app_context, &ctx);
+                    });
                 }
 
                 // 6) Advance the event loop and present.
@@ -905,153 +1092,104 @@ fn Engine(comptime Game: type, comptime table: GameTable(Game)) type {
             }
         }
 
-        fn update(self: *Self, game: *Game) void {
-            while (self.events.read()) |event| {
+        fn update(self: *@This()) void {
+            var game = self.game;
+            var app = self.app;
+
+            while (self.event_reader.read()) |event| {
                 switch (event) {
-                    .close_request => |args| table.receiveCloseRequest(game, self.app_context, args),
-                    .focus_state => |args| table.receiveFocusState(game, self.app_context, args),
-                    .iconify_state => |args| table.receiveIconifyState(game, self.app_context, args),
-                    .key_action => |args| table.receiveKeyAction(game, self.app_context, args),
-                    .char_input => |args| table.receiveCharInput(game, self.app_context, args),
-                    .mouse_button_action => |args| table.receiveMouseButtonAction(game, self.app_context, args),
-                    .mouse_scroll => |args| table.receiveMouseScroll(game, self.app_context, args),
-                    .cursor_position => |args| table.receiveCursorPosition(game, self.app_context, args),
-                    .cursor_entry_state => |args| table.receiveCursorEntryState(game, self.app_context, args),
+                    .close_request => |args| table.handleCloseRequest(game, app, args),
+                    .focus_state => |args| table.receiveFocusState(game, app, args),
+                    .iconify_state => |args| table.receiveIconifyState(game, app, args),
+                    .key_action => |args| table.receiveKeyAction(game, app, args),
+                    .char_input => |args| table.receiveCharInput(game, app, args),
+                    .mouse_button_action => |args| table.receiveMouseButtonAction(game, app, args),
+                    .mouse_scroll => |args| table.receiveMouseScroll(game, app, args),
+                    .cursor_position => |args| table.receiveCursorPosition(game, app, args),
+                    .cursor_entry_state => |args| table.receiveCursorEntryState(game, app, args),
                 }
             }
 
-            if (self.app_context.loopback) |loopback| {
-                loopback.processPacketsFromServer(self.app_context.netcode_client);
+            if (app.loopback) |loopback| {
+                loopback.processPacketsFromServer(app.netcode_client);
             }
             var packet_sequence: u64 = undefined;
-            while (self.app_context.netcode_client.receivePacket(&packet_sequence) catch null) |data| {
-                table.receiveServerData(game, self.app_context, .{
+            while (app.netcode_client.receivePacket(&packet_sequence) catch null) |data| {
+                table.receiveServerData(game, app, .{
                     .data = data,
                     .sequence = packet_sequence,
                 });
-                self.app_context.netcode_client.freePacket(data);
+                app.netcode_client.freePacket(data);
             }
 
-            var timestamp = self.world_timer.read();
-            var world_delta = timestamp - self.world_timestamp;
-            if (world_delta < ticks_per_step) return;
-
-            var steps = world_delta / ticks_per_step;
-            if (steps > max_steps_per_update) {
-                const steps_to_skip = steps - max_steps_per_update;
-                table.skipSteps(game, self.app_context, steps_to_skip);
-                steps -= steps_to_skip;
-                self.world_timestamp += steps_to_skip * ticks_per_step;
+            const step_time = self.config.step_time;
+            const max_steps = self.config.max_step_delay / step_time;
+            const world_delta = self.world_timer.read() - self.world_timestamp;
+            var steps = world_delta / step_time;
+            if (steps > max_steps) {
+                const skipped_steps = steps - max_steps;
+                table.handleSkippedSteps(game, app, .{ .count = skipped_steps });
+                steps -= skipped_steps;
+                self.world_timestamp += skipped_steps * step_time;
             }
 
             var i: usize = 0;
             while (i < steps) : (i += 1) {
-                table.step(game, self.app_context);
-                self.world_timestamp += ticks_per_step;
+                table.step(game, app, .{});
+                self.world_timestamp += step_time;
             }
-        }
-
-        fn displaysChanged(displays: *[]DisplayInfo, buffer: *[DISPLAY_MAX]DisplayInfo) glfw.Error!bool {
-            // Pre-emptively set display return to an empty slice in case of error.
-            var old_displays = displays;
-            displays.* = buffer[0..0];
-
-            var state_changed = false;
-            const monitors = try Monitor.getAll();
-            const new_len = @min(monitors.len, DISPLAY_MAX);
-            if (old_displays.len == new_len) {
-                for (monitors, 0..new_len) |maybe_monitor, i| {
-                    const monitor = maybe_monitor orelse return glfw.Error.Unknown;
-                    const old_info = old_displays.*[i];
-                    const new_info = try getDisplayInfo(monitor);
-                    if (std.meta.eql(old_info, new_info)) {
-                        buffer[i] = old_info;
-                    } else {
-                        buffer[i] = new_info;
-                        state_changed = true;
-                    }
-                }
-            } else {
-                state_changed = true;
-                for (monitors, 0..new_len) |maybe_monitor, i| {
-                    const monitor = maybe_monitor orelse return glfw.Error.Unknown;
-                    buffer[i] = try getDisplayInfo(monitor);
-                }
-            }
-
-            displays.* = buffer[0..new_len];
-            return state_changed;
-        }
-
-        fn onPos(self: *Self, pos: Point) void {
-            self.app.onPos(pos);
-        }
-
-        fn onSize(self: *Self, size: Size) void {
-            self.app.onSize(size);
-        }
-
-        fn onFramebufferSize(self: *Self, size: Size) void {
-            const wh = packSize(size);
-            @atomicStore(u64, &self.framebuffer_wh, wh, .SeqCst);
-        }
-
-        fn onClose(self: *Self) void {
-            self.events.write(.{ .close_request = {} });
-        }
-
-        fn onFocus(self: *Self, focused: bool) void {
-            self.events.write(.{ .focus_state = .{ .focused = focused } });
-        }
-
-        fn onIconify(self: *Self, iconified: bool) void {
-            self.events.write(.{ .iconify_state = .{ .iconified = iconified } });
-        }
-
-        fn onMaximize(self: *Self, value: bool) void {
-            self.app.onMaximize(value);
-        }
-
-        fn onKey(self: *Self, key: Key, scancode: i32, action: KeyAction, mods: KeyMods) void {
-            self.events.write(.{ .key_action = .{
-                .key = key,
-                .scancode = scancode,
-                .action = action,
-                .mods = mods,
-            } });
-        }
-
-        fn onChar(self: *Self, codepoint: u21) void {
-            self.events.write(.{ .char_input = .{ .codepoint = codepoint } });
-        }
-
-        fn onMouseButton(self: *Self, button: MouseButton, action: MouseButtonAction, mods: KeyMods) void {
-            self.events.write(.{ .mouse_button_action = .{
-                .button = button,
-                .action = action,
-                .mods = mods,
-            } });
-        }
-
-        fn onCursorPos(self: *Self, x: f64, y: f64) void {
-            self.events.write(.{ .cursor_position = .{
-                .x = x,
-                .y = y,
-            } });
-        }
-
-        fn onCursorEnter(self: *Self, entered: bool) void {
-            self.events.write(.{ .cursor_entry_state = .{ .entered = entered } });
-        }
-
-        fn onScroll(self: *Self, x_offset: f64, y_offset: f64) void {
-            self.events.write(.{ .mouse_scroll = .{
-                .x_offset = x_offset,
-                .y_offset = y_offset,
-            } });
         }
     };
 }
+
+const DisplayArray = struct {
+    buffer: [DISPLAY_MAX]DisplayInfo,
+    count: usize,
+
+    pub fn create() !@This() {
+        const monitors = try Monitor.getAll();
+        var buffer: [DISPLAY_MAX]DisplayInfo = undefined;
+        var count: usize = @min(monitors.len, DISPLAY_MAX);
+        for (monitors, 0..count) |monitor, i| {
+            buffer[i] = try getDisplayInfo(monitor.?);
+        }
+        return .{ .buffer = buffer, .count = count };
+    }
+
+    pub fn slice(self: @This()) []const DisplayInfo {
+        return self.buffer[0..self.count];
+    }
+
+    pub fn stateChanged(self: *@This()) glfw.Error!bool {
+        // Pre-emptively set displays to an empty slice in case of error.
+        const old_count = self.count;
+        self.count = 0;
+
+        var state_changed = false;
+        const monitors = try Monitor.getAll();
+        const new_count = @min(monitors.len, DISPLAY_MAX);
+        if (old_count == new_count) {
+            for (monitors, 0..new_count) |maybe_monitor, i| {
+                const monitor = maybe_monitor orelse return glfw.Error.Unknown;
+                const old_info = self.buffer[i];
+                const new_info = try getDisplayInfo(monitor);
+                if (!std.meta.eql(old_info, new_info)) {
+                    state_changed = true;
+                    self.buffer[i] = new_info;
+                }
+            }
+        } else {
+            state_changed = true;
+            for (monitors, 0..new_count) |maybe_monitor, i| {
+                const monitor = maybe_monitor orelse return glfw.Error.Unknown;
+                self.buffer[i] = try getDisplayInfo(monitor);
+            }
+        }
+
+        self.count = new_count;
+        return state_changed;
+    }
+};
 
 const Joystick = struct {
     id: usize = std.math.maxInt(usize),
@@ -1064,32 +1202,32 @@ const Joystick = struct {
     axis_count: usize = 0,
     hat_count: usize = 0,
 
-    pub fn init(joystick: *Joystick, id: usize) void {
-        joystick.id = id;
+    pub fn init(self: *@This(), id: usize) void {
+        self.id = id;
     }
 
-    pub fn getStateArgs(joystick: Joystick) JoyStateArgs {
+    pub fn getStateArgs(self: @This()) JoyStateArgs {
         return .{
-            .id = joystick.id,
-            .connected = joystick.connected,
-            .info = joystick.info,
+            .id = self.id,
+            .connected = self.connected,
+            .info = self.info,
             .state = .{
-                .buttons = joystick.button_buffer[0..joystick.button_count],
-                .axes = joystick.axis_buffer[0..joystick.axis_count],
-                .hats = joystick.hat_buffer[0..joystick.hat_count],
+                .buttons = self.button_buffer[0..self.button_count],
+                .axes = self.axis_buffer[0..self.axis_count],
+                .hats = self.hat_buffer[0..self.hat_count],
             },
         };
     }
 
     /// In addition to GLFW-reported errors, returns glfw.Error.Unknown if we can't read a detected joystick's state.
-    pub fn stateChanged(joystick: *Joystick) glfw.Error!bool {
-        const jid: i32 = @intCast(joystick.id);
+    pub fn stateChanged(self: *@This()) glfw.Error!bool {
+        const jid: i32 = @intCast(self.id);
         if (!glfw.joystickPresent(jid)) {
-            if (joystick.connected) {
-                joystick.connected = false;
-                joystick.button_count = 0;
-                joystick.axis_count = 0;
-                joystick.hat_count = 0;
+            if (self.connected) {
+                self.connected = false;
+                self.button_count = 0;
+                self.axis_count = 0;
+                self.hat_count = 0;
                 return true;
             } else {
                 return false;
@@ -1118,12 +1256,12 @@ const Joystick = struct {
             .pid = pid,
             .is_xinput = is_xinput,
         };
-        joystick.info = info;
+        self.info = info;
 
         {
             const len = @min(JOY_BUTTON_MAX, new_buttons.len);
-            if (joystick.button_count != len) {
-                joystick.button_count = len;
+            if (self.button_count != len) {
+                self.button_count = len;
                 state_changed = true;
             }
             var i: usize = 0;
@@ -1133,8 +1271,8 @@ const Joystick = struct {
                     .press => .pressed,
                     _ => .released,
                 };
-                if (joystick.button_buffer[i] != new_button) {
-                    joystick.button_buffer[i] = new_button;
+                if (self.button_buffer[i] != new_button) {
+                    self.button_buffer[i] = new_button;
                     state_changed = true;
                 }
             }
@@ -1142,15 +1280,15 @@ const Joystick = struct {
 
         {
             const len = @min(JOY_AXIS_MAX, new_axes.len);
-            if (joystick.axis_count != len) {
-                joystick.axis_count = len;
+            if (self.axis_count != len) {
+                self.axis_count = len;
                 state_changed = true;
             }
             var i: usize = 0;
             while (i < len) : (i += 1) {
                 const new_axis = new_axes[i];
-                if (joystick.axis_buffer[i] != new_axis) {
-                    joystick.axis_buffer[i] = new_axis;
+                if (self.axis_buffer[i] != new_axis) {
+                    self.axis_buffer[i] = new_axis;
                     state_changed = true;
                 }
             }
@@ -1158,8 +1296,8 @@ const Joystick = struct {
 
         {
             const len = @min(JOY_HAT_MAX, new_hats.len);
-            if (joystick.hat_count != len) {
-                joystick.hat_count = len;
+            if (self.hat_count != len) {
+                self.hat_count = len;
                 state_changed = true;
             }
             var i: usize = 0;
@@ -1176,8 +1314,8 @@ const Joystick = struct {
                     .centered => .centered,
                     _ => .centered,
                 };
-                if (joystick.hat_buffer[i] != new_hat) {
-                    joystick.hat_buffer[i] = new_hat;
+                if (self.hat_buffer[i] != new_hat) {
+                    self.hat_buffer[i] = new_hat;
                     state_changed = true;
                 }
             }
@@ -1203,30 +1341,6 @@ const Joystick = struct {
             else => null,
         };
     }
-};
-
-const EventKind = enum {
-    close_request,
-    focus_state,
-    iconify_state,
-    key_action,
-    char_input,
-    mouse_button_action,
-    mouse_scroll,
-    cursor_position,
-    cursor_entry_state,
-};
-
-const EventArgs = union(EventKind) {
-    close_request: CloseRequestArgs,
-    focus_state: FocusStateArgs,
-    iconify_state: IconifyStateArgs,
-    key_action: KeyActionArgs,
-    char_input: CharInputArgs,
-    mouse_button_action: MouseButtonActionArgs,
-    mouse_scroll: MouseScrollArgs,
-    cursor_position: CursorPositionArgs,
-    cursor_entry_state: CursorEntryStateArgs,
 };
 
 // ====================================================================================================================
@@ -1584,7 +1698,7 @@ const objc = struct {
 };
 
 // ====================================================================================================================
-// MISCELLANY
+// UTILS
 
 /// A simple pseudo ring buffer for tracking frame rate.
 /// The type args are the minimum and maximum number of frames the tracker is allowed to use to estimate FPS.
@@ -1592,8 +1706,6 @@ const objc = struct {
 fn FrameTracker(comptime min_frames: u32, comptime max_frames: u32) type {
     if (min_frames > max_frames) @compileError("min_frames > max_frames");
     return struct {
-        const Self = @This();
-
         timer: Timer,
         started: bool = false,
         head: usize = 0,
@@ -1602,7 +1714,7 @@ fn FrameTracker(comptime min_frames: u32, comptime max_frames: u32) type {
         buffer_sorted: [max_frames]u64 = [_]u64{undefined} ** max_frames,
 
         /// Starts the tracker if needed, or laps and records the frame time. Must be called exactly once each frame, at the same point in the frame (e.g. right after swapping buffers).
-        pub fn startOrLap(self: *Self) void {
+        pub fn startOrLap(self: *@This()) void {
             if (!self.started) {
                 self.timer.reset();
                 self.started = true;
@@ -1619,7 +1731,7 @@ fn FrameTracker(comptime min_frames: u32, comptime max_frames: u32) type {
         }
 
         /// Clear all recorded frame times from the buffer, starting fresh.
-        pub fn reset(self: *Self) void {
+        pub fn reset(self: *@This()) void {
             // No point in clearing buffers themselves.
             self.started = false;
             self.head = 0;
@@ -1627,7 +1739,7 @@ fn FrameTracker(comptime min_frames: u32, comptime max_frames: u32) type {
         }
 
         /// Get an estimate of FPS. Returns null if the tracker hasn't recorded sufficient data to estimate frame rate.
-        pub fn estimateFps(self: *Self) ?f64 {
+        pub fn estimateFps(self: *@This()) ?f64 {
             const s = self.size;
             if (s < min_frames or s == 0) return null;
 
@@ -1650,8 +1762,6 @@ fn FrameTracker(comptime min_frames: u32, comptime max_frames: u32) type {
 fn RingBuffer(comptime size: usize, comptime T: type) type {
     if (size < 3) @compileError("Ring buffer must hold at least 3 items.");
     return struct {
-        const Self = @This();
-
         items: [size]T = [_]T{undefined} ** size,
         head: usize = 0, // location of next write (exclusive end)
         tail: usize = 0, // location of next read (inclusive start)
@@ -1661,7 +1771,7 @@ fn RingBuffer(comptime size: usize, comptime T: type) type {
         mutex: std.Thread.Mutex = .{},
         condition: std.Thread.Condition = .{},
 
-        pub fn write(self: *Self, item: T) void {
+        pub fn write(self: *@This(), item: T) void {
             // Write item
             const head = @atomicLoad(usize, &self.head, .SeqCst);
             self.items[head] = item;
@@ -1688,13 +1798,13 @@ fn RingBuffer(comptime size: usize, comptime T: type) type {
             @atomicStore(usize, &self.head, next_head, .SeqCst);
         }
 
-        pub fn read(self: *Self) ?T {
+        pub fn read(self: *@This()) ?T {
             const item = self.readWithoutRelease() orelse return null;
             self.releasePreviousRead();
             return item;
         }
 
-        pub fn readWithoutRelease(self: *Self) ?T {
+        pub fn readWithoutRelease(self: *@This()) ?T {
             // Return null if the buffer is empty
             const tail = @atomicLoad(usize, &self.tail, .SeqCst);
             const head = @atomicLoad(usize, &self.head, .SeqCst);
@@ -1708,7 +1818,7 @@ fn RingBuffer(comptime size: usize, comptime T: type) type {
             }
         }
 
-        pub fn releasePreviousRead(self: *Self) void {
+        pub fn releasePreviousRead(self: *@This()) void {
             // Return if already released
             if (@cmpxchgStrong(bool, &self.read_unreleased, true, false, .SeqCst, .SeqCst) != null) return;
 

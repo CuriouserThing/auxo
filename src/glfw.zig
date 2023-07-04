@@ -222,6 +222,7 @@ pub const Window = opaque {
     extern fn glfwShowWindow(*Self) void;
     extern fn glfwRestoreWindow(*Self) void;
     extern fn glfwMaximizeWindow(*Self) void;
+    extern fn glfwSetWindowTitle(*Self, [*:0]const u8) void;
     extern fn glfwGetWindowPos(*Self, *c_int, *c_int) void;
     extern fn glfwSetWindowPos(*Self, c_int, c_int) void;
     extern fn glfwGetWindowSize(*Self, *c_int, *c_int) void;
@@ -254,6 +255,10 @@ pub const Window = opaque {
 
     pub fn maximize(self: *Self) void {
         glfwMaximizeWindow(self);
+    }
+
+    pub fn setTitle(self: *Self, title: [:0]const u8) void {
+        glfwSetWindowTitle(self, title);
     }
 
     pub fn getPos(self: *Self) !Point {
