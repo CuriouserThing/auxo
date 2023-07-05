@@ -1,105 +1,48 @@
 const std = @import("std");
 const auxo = @import("auxo");
-const AppContext = auxo.AppContext;
-const GraphicsContext = auxo.zgpu.GraphicsContext;
+const Game = @import("Game.zig");
+const Graphics = @import("Graphics.zig");
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
     var allocator = arena.allocator();
 
     var game = try allocator.create(Game);
     defer allocator.destroy(game);
 
-    var client = Client{ .game = game };
-    try auxo.run(Client, Game, Client.Table, &client, allocator);
+    var graphics = try allocator.create(Graphics);
+    defer allocator.destroy(graphics);
+
+    const config = .{
+        .step_time = std.time.ns_per_s / 720,
+    };
+    game.* = .{ .graphics = graphics };
+    var loopback_server = LoopbackServer{};
+    try auxo.runLoopback(
+        Game,
+        Game.Table,
+        config,
+        game,
+        LoopbackServer,
+        LoopbackServer.run,
+        &loopback_server,
+        allocator,
+    );
 }
 
-const Client = struct {
-    const Table = auxo.ClientTable(Client, Game){
-        // Config
-        .use_imgui = true,
+const LoopbackServer = struct {
+    const ticks_per_second = 100.0;
 
-        // Methods
-        .createWindow = createWindow,
-        .init = init,
-        .deinit = deinit,
-
-        // Inner
-        .game_table = Game.Table,
-    };
-
-    game: *Game,
-
-    fn createWindow(_: *Client, _: []auxo.DisplayInfo) !auxo.WindowCreationState {
-        return .{
-            .title = "Auxo Demo",
-            .restored_size = .{ .w = 640, .h = 480 },
-        };
+    pub fn run(_: *LoopbackServer, ctx: *auxo.LoopbackContext) void {
+        while (ctx.clientActive()) {
+            if (ctx.clientConnected()) {
+                while (ctx.receivePacket()) |packet| {
+                    _ = packet;
+                }
+            }
+            std.time.sleep(std.time.ns_per_s / ticks_per_second);
+        }
     }
-
-    fn init(self: *Client, _: *AppContext, _: *GraphicsContext) !*Game {
-        self.game.* = .{};
-        return self.game;
-    }
-
-    fn deinit(_: *Client, _: *const AppContext, _: *Game) void {}
-};
-
-const Game = struct {
-    const Table = auxo.GameTable(Game){
-        // Config
-        .step_time = 1.0 / 720.0,
-
-        // Methods
-        .step = step,
-        .skipSteps = skipSteps,
-        .draw = draw,
-        .onSwapchainResized = onSwapchainResized,
-        .receiveCloseRequest = receiveCloseRequest,
-        .receiveFocusState = receiveFocusState,
-        .receiveIconifyState = receiveIconifyState,
-        .receiveKeyAction = receiveKeyAction,
-        .receiveCharInput = receiveCharInput,
-        .receiveMouseButtonAction = receiveMouseButtonAction,
-        .receiveMouseScroll = receiveMouseScroll,
-        .receiveCursorPosition = receiveCursorPosition,
-        .receiveCursorEntryState = receiveCursorEntryState,
-        .receiveJoyState = receiveJoyState,
-        .receiveDisplayState = receiveDisplayState,
-        .receiveServerData = receiveServerData,
-    };
-
-    fn step(_: *Game, _: *AppContext) void {}
-
-    fn skipSteps(_: *Game, _: *AppContext, _: usize) void {}
-
-    fn draw(_: *Game, _: *AppContext, _: *GraphicsContext, _: auxo.FrameInfo) void {}
-
-    fn onSwapchainResized(_: *Game, _: *AppContext, _: *GraphicsContext, _: auxo.Size) void {}
-
-    fn receiveCloseRequest(_: *Game, app: *AppContext, _: auxo.CloseRequestArgs) void {
-        app.close();
-    }
-
-    fn receiveFocusState(_: *Game, _: *AppContext, _: auxo.FocusStateArgs) void {}
-
-    fn receiveIconifyState(_: *Game, _: *AppContext, _: auxo.IconifyStateArgs) void {}
-
-    fn receiveKeyAction(_: *Game, _: *AppContext, _: auxo.KeyActionArgs) void {}
-
-    fn receiveCharInput(_: *Game, _: *AppContext, _: auxo.CharInputArgs) void {}
-
-    fn receiveMouseButtonAction(_: *Game, _: *AppContext, _: auxo.MouseButtonActionArgs) void {}
-
-    fn receiveMouseScroll(_: *Game, _: *AppContext, _: auxo.MouseScrollArgs) void {}
-
-    fn receiveCursorPosition(_: *Game, _: *AppContext, _: auxo.CursorPositionArgs) void {}
-
-    fn receiveCursorEntryState(_: *Game, _: *AppContext, _: auxo.CursorEntryStateArgs) void {}
-
-    fn receiveJoyState(_: *Game, _: *AppContext, _: auxo.JoyStateArgs) void {}
-
-    fn receiveDisplayState(_: *Game, _: *AppContext, _: auxo.DisplayStateArgs) void {}
-
-    fn receiveServerData(_: *Game, _: *AppContext, _: auxo.ServerDataArgs) void {}
 };
